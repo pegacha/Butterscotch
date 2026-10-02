@@ -274,8 +274,10 @@ typedef struct {
     bool exists;
     bool inVRAM;
     bool needsClear;
-    int32_t width;
+    int32_t width;   // as created by GML
     int32_t height;
+    int32_t backedW; // stored part (<= 1024)
+    int32_t backedH;
     C3D_Tex texture;
     C3D_RenderTarget* target;
     Tex3DS_SubTexture subtex;
@@ -4153,8 +4155,22 @@ static void N3DSRenderer_drawTiled(Renderer* base, int32_t tpagIndex, float orig
     int32_t tilesY = tileY ? ((int32_t) ((endY - startY) / tileH) + 1) : 1;
     if (tilesX <= 0 || tilesY <= 0) return;
 
-    float viewRight = (renderer->viewScaleX != 0.0f) ? ((float) renderer->viewX + ((float) N3DS_TOP_WIDTH / fabsf(renderer->viewScaleX))) : (float) renderer->viewX;
-    float viewBottom = (renderer->viewScaleY != 0.0f) ? ((float) renderer->viewY + ((float) N3DS_TOP_HEIGHT / fabsf(renderer->viewScaleY))) : (float) renderer->viewY;
+    // Visible room-space rectangle of the active target (the camera offset lives in portOffset, not viewX/viewY).
+    float viewLeft, viewTop, viewRight, viewBottom;
+    {
+        float targetW = 0.0f, targetH = 0.0f;
+        N3DSRenderer_getActiveTargetSize(renderer, &targetW, &targetH);
+        float ox = renderer->frameOffsetX + renderer->portOffsetX;
+        float oy = renderer->frameOffsetY + renderer->portOffsetY;
+        float sx = renderer->viewScaleX != 0.0f ? renderer->viewScaleX : 1.0f;
+        float sy = renderer->viewScaleY != 0.0f ? renderer->viewScaleY : 1.0f;
+        float lx0 = (float) renderer->viewX + (0.0f - ox) / sx, lx1 = (float) renderer->viewX + (targetW - ox) / sx;
+        float ly0 = (float) renderer->viewY + (0.0f - oy) / sy, ly1 = (float) renderer->viewY + (targetH - oy) / sy;
+        viewLeft = lx0 < lx1 ? lx0 : lx1;
+        viewRight = lx0 < lx1 ? lx1 : lx0;
+        viewTop = ly0 < ly1 ? ly0 : ly1;
+        viewBottom = ly0 < ly1 ? ly1 : ly0;
+    }
     int32_t startTileX = 0;
     int32_t endTileX = tilesX;
     int32_t startTileY = 0;
@@ -4162,7 +4178,7 @@ static void N3DSRenderer_drawTiled(Renderer* base, int32_t tpagIndex, float orig
 
     if (tileX) {
         float firstVisibleLeft = startX + dxLocalX0;
-        float minTileX = floorf((((float) renderer->viewX) - (firstVisibleLeft + tileGameW)) / tileW) + 1.0f;
+        float minTileX = floorf(((viewLeft) - (firstVisibleLeft + tileGameW)) / tileW) + 1.0f;
         float maxTileX = ceilf((viewRight - firstVisibleLeft) / tileW);
         startTileX = (int32_t) minTileX;
         endTileX = (int32_t) maxTileX;
@@ -4172,7 +4188,7 @@ static void N3DSRenderer_drawTiled(Renderer* base, int32_t tpagIndex, float orig
 
     if (tileY) {
         float firstVisibleTop = startY + dyLocalY0;
-        float minTileY = floorf((((float) renderer->viewY) - (firstVisibleTop + tileGameH)) / tileH) + 1.0f;
+        float minTileY = floorf(((viewTop) - (firstVisibleTop + tileGameH)) / tileH) + 1.0f;
         float maxTileY = ceilf((viewBottom - firstVisibleTop) / tileH);
         startTileY = (int32_t) minTileY;
         endTileY = (int32_t) maxTileY;
@@ -4190,7 +4206,7 @@ static void N3DSRenderer_drawTiled(Renderer* base, int32_t tpagIndex, float orig
         float localBottom = localTop + tileGameH;
         float localMinY = localTop < localBottom ? localTop : localBottom;
         float localMaxY = localTop > localBottom ? localTop : localBottom;
-        float visTop = localMinY > (float) renderer->viewY ? localMinY : (float) renderer->viewY;
+        float visTop = localMinY > viewTop ? localMinY : viewTop;
         float visBottom = localMaxY < viewBottom ? localMaxY : viewBottom;
         if (visTop >= visBottom) continue;
 
@@ -4202,7 +4218,7 @@ static void N3DSRenderer_drawTiled(Renderer* base, int32_t tpagIndex, float orig
             float localRight = localLeft + tileGameW;
             float localMinX = localLeft < localRight ? localLeft : localRight;
             float localMaxX = localLeft > localRight ? localLeft : localRight;
-            float visLeft = localMinX > (float) renderer->viewX ? localMinX : (float) renderer->viewX;
+            float visLeft = localMinX > viewLeft ? localMinX : viewLeft;
             float visRight = localMaxX < viewRight ? localMaxX : viewRight;
             if (visLeft >= visRight) continue;
 
@@ -4772,13 +4788,18 @@ void N3DSRenderer_collectGarbage(Renderer* base, bool all) {
 static bool N3DSRenderer_allocSurfaceTexture(N3DSRenderer* renderer, N3DSSurface* surface, int32_t width, int32_t height) {
     if (width <= 0) width = 1;
     if (height <= 0) height = 1;
-    if (width > 1024 || height > 1024) {
-        N3DS_UNIMPL("createSurface", "size>1024 %dx%d", (int) width, (int) height);
-        if (width > 1024) width = 1024;
-        if (height > 1024) height = 1024;
+    // PICA textures stop at 1024: a bigger surface keeps its logical size (what GML sees and draws into) but only its
+    // top-left 1024x1024 is stored; anything drawn beyond that is clipped. AM2R's 2048x1024 pause-map surface only ever
+    // shows its top-left corner.
+    int32_t backedW = width > 1024 ? 1024 : width;
+    int32_t backedH = height > 1024 ? 1024 : height;
+    if (backedW != width || backedH != height) {
+        static bool warned = false;
+        if (!warned) logWarn("N3DS: surface %dx%d is backed by %dx%d (PICA texture limit)\n", (int) width, (int) height, (int) backedW, (int) backedH);
+        warned = true;
     }
-    uint16_t texW = N3DSRenderer_pow2Size(width);
-    uint16_t texH = N3DSRenderer_pow2Size(height);
+    uint16_t texW = N3DSRenderer_pow2Size(backedW);
+    uint16_t texH = N3DSRenderer_pow2Size(backedH);
     bool ok = C3D_TexInitVRAM(&surface->texture, texW, texH, GPU_RGBA8);
     surface->inVRAM = ok;
     if (!ok) ok = C3D_TexInit(&surface->texture, texW, texH, GPU_RGBA8);
@@ -4797,14 +4818,16 @@ static bool N3DSRenderer_allocSurfaceTexture(N3DSRenderer* renderer, N3DSSurface
     C3D_TexSetWrap(&surface->texture, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
     surface->width = width;
     surface->height = height;
+    surface->backedW = backedW;
+    surface->backedH = backedH;
     surface->image.tex = &surface->texture;
     surface->image.subtex = &surface->subtex;
-    surface->subtex.width = (uint16_t) width;
-    surface->subtex.height = (uint16_t) height;
+    surface->subtex.width = (uint16_t) backedW;
+    surface->subtex.height = (uint16_t) backedH;
     surface->subtex.left = 0.0f;
     surface->subtex.top = 1.0f;
-    surface->subtex.right = (float) width / (float) texW;
-    surface->subtex.bottom = 1.0f - (float) height / (float) texH;
+    surface->subtex.right = (float) backedW / (float) texW;
+    surface->subtex.bottom = 1.0f - (float) backedH / (float) texH;
     // New surfaces start transparent black (GameMaker leaves them undefined); cleared on first bind, on the GPU.
     surface->needsClear = true;
     return true;
@@ -5170,8 +5193,8 @@ static void N3DSRenderer_drawSurfaceRegion(Renderer* base, N3DSSurface* surface,
     }
     if (srcLeft < 0) { srcWidth += srcLeft; x -= (float) srcLeft * xscale; srcLeft = 0; }
     if (srcTop < 0) { srcHeight += srcTop; y -= (float) srcTop * yscale; srcTop = 0; }
-    if (srcLeft + srcWidth > surface->width) srcWidth = surface->width - srcLeft;
-    if (srcTop + srcHeight > surface->height) srcHeight = surface->height - srcTop;
+    if (srcLeft + srcWidth > surface->backedW) srcWidth = surface->backedW - srcLeft;
+    if (srcTop + srcHeight > surface->backedH) srcHeight = surface->backedH - srcTop;
     if (srcWidth <= 0 || srcHeight <= 0) return;
     float texW = (float) surface->texture.width;
     float texH = (float) surface->texture.height;

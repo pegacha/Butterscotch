@@ -1,0 +1,34 @@
+# From the title, load save slot A (run_in_azahar.ps1 -Save <dir>), then head right from the landing site.
+after_room titleroom
+press 800 START 4
+press 900 START 4
+press 1000 A 4
+press 1100 A 4
+after_room rm_a0h01
+press 60 RIGHT 1500
+press 120 A 25
+press 220 A 25
+press 320 A 25
+press 420 A 25
+press 520 A 25
+press 620 A 25
+press 720 A 25
+press 820 A 25
+press 920 A 25
+press 1020 A 25
+press 1120 A 25
+press 1220 A 25
+press 1320 A 25
+press 1420 A 25
+press 1520 A 25
+screenshot 150
+screenshot 300
+screenshot 450
+screenshot 600
+screenshot 750
+screenshot 900
+screenshot 1050
+screenshot 1200
+screenshot 1350
+screenshot 1500
+exit 1570

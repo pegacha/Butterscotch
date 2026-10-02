@@ -1,0 +1,10 @@
+after_room titleroom
+screenshot 780
+press 800 START 4
+screenshot 880
+press 900 START 4
+screenshot 980
+press 1000 A 4
+screenshot 1080
+screenshot 1300
+exit 1310

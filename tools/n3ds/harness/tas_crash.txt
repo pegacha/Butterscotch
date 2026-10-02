@@ -1,0 +1,11 @@
+screenshot 300
+screenshot 600
+screenshot 900
+screenshot 1200
+screenshot 1500
+screenshot 1800
+screenshot 2100
+screenshot 2400
+screenshot 2700
+screenshot 2950
+exit 3000

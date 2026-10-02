@@ -38,9 +38,18 @@ typedef struct {
     int32_t frame;
     int32_t length;
     u32 key;
+    int32_t anchor; // index into gAnchors, -1 = frames since start
 } N3DSHarnessCmd;
 
+// "after_room <name>": the following commands count frames from the first entry into that room
+// (after the previous anchor fired), so scripts survive timing differences such as intro length.
+typedef struct {
+    char room[48];
+    int32_t frame; // -1 until entered
+} N3DSHarnessAnchor;
+
 static N3DSHarnessCmd* gHarness = NULL;
+static N3DSHarnessAnchor* gAnchors = NULL;
 static int32_t gFrame = 0;
 static u32 gKeysHeldPrev = 0;
 static bool gExitRequested = false;
@@ -64,9 +73,16 @@ static void N3DSInput_loadHarness(void) {
     while (fgets(line, sizeof(line), f) != NULL) {
         char cmd[32] = "", arg[32] = "";
         int frame = 0, length = 1;
+        char room[48] = "";
+        if (sscanf(line, "after_room %47s", room) == 1) {
+            N3DSHarnessAnchor a = { .frame = -1 };
+            snprintf(a.room, sizeof(a.room), "%s", room);
+            arrput(gAnchors, a);
+            continue;
+        }
         int n = sscanf(line, "%31s %d %31s %d", cmd, &frame, arg, &length);
         if (n < 2 || cmd[0] == '#') continue;
-        N3DSHarnessCmd c = { .frame = frame, .length = 1 };
+        N3DSHarnessCmd c = { .frame = frame, .length = 1, .anchor = (int32_t) arrlen(gAnchors) - 1 };
         if (strcmp(cmd, "press") == 0 && n >= 3) {
             c.kind = 0;
             c.key = N3DSInput_keyFromName(arg);
@@ -136,11 +152,25 @@ static void N3DSInput_fillGamepad(GamepadSlot* slot, u32 held, const circlePosit
 u32 N3DSInput_update(Runner* runner) {
     hidScanInput();
     u32 held = hidKeysHeld();
+    repeat(arrlen(gAnchors), a) {
+        if (gAnchors[a].frame >= 0) continue;
+        if (runner->currentRoom != NULL && runner->currentRoom->name != NULL && strcmp(runner->currentRoom->name, gAnchors[a].room) == 0) {
+            gAnchors[a].frame = gFrame;
+            logInfo("Harness: anchor %s at frame %d\n", gAnchors[a].room, (int) gFrame);
+        }
+        break; // anchors fire in order
+    }
     repeat(arrlen(gHarness), i) {
         N3DSHarnessCmd* c = &gHarness[i];
-        if (c->kind == 0 && gFrame >= c->frame && gFrame < c->frame + c->length) held |= c->key;
-        if (c->kind == 1 && gFrame == c->frame) N3DSScreenshot_request(gFrame);
-        if (c->kind == 2 && gFrame == c->frame) gExitRequested = true;
+        int32_t base = 0;
+        if (c->anchor >= 0) {
+            base = gAnchors[c->anchor].frame;
+            if (base < 0) continue;
+        }
+        int32_t f = gFrame - base;
+        if (c->kind == 0 && f >= c->frame && f < c->frame + c->length) held |= c->key;
+        if (c->kind == 1 && f == c->frame) N3DSScreenshot_request(gFrame);
+        if (c->kind == 2 && f == c->frame) gExitRequested = true;
     }
     circlePosition circle, cstick;
     hidCircleRead(&circle);

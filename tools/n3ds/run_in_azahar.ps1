@@ -12,7 +12,14 @@
   powershell -ExecutionPolicy Bypass -File tools\n3ds\run_in_azahar.ps1 -Harness tools\n3ds\harness\title.txt -WaitSeconds 120
 #>
 param(
-    [int]$WaitSeconds = 120,
+    # Hard limit: the emulator is killed after this many seconds even if the harness has not finished.
+    [int]$WaitSeconds = 150,
+    # Folder with save files (sav1, config.ini, ...) copied into the game folder before launch, e.g. a known checkpoint.
+    [string]$Save = "",
+    # Start without any save files (fresh new game).
+    [switch]$ClearSaves,
+    # Keyboard input playback (desktop --playback-inputs JSON, e.g. from ltm_to_inputs.py), copied as inputs.json.
+    [string]$Inputs = "",
     [switch]$NoBuild,
     [string]$Harness = "",
     [string]$AzaharDir = $(if ($env:AZAHAR_DIR) { $env:AZAHAR_DIR } else { "$env:USERPROFILE\Desktop\KeeperFx_3DS\tools\azahar\azahar-windows-msvc-2126.1.2" }),
@@ -44,11 +51,18 @@ if (-not (Test-Path $built)) { throw "no build output at $built" }
 # Stage: copy the game folder over (no deletes: saves and config the game wrote stay).
 New-Item -ItemType Directory -Force $gameDir | Out-Null
 $stageWin = "\\wsl.localhost\$Distro" + ($SdInWsl -replace "/", "\")
-& robocopy $stageWin $gameDir /E /XD shots audio /XF butterscotch.log done.txt harness.txt atlas_trace.log /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
+& robocopy $stageWin $gameDir /E /XD shots audio /XF butterscotch.log done.txt harness.txt inputs.json atlas_trace.log /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed ($LASTEXITCODE)" }
 Copy-Item -Force $built (Join-Path $gameDir "butterscotch.3dsx")
 Remove-Item -Force -Recurse -ErrorAction SilentlyContinue (Join-Path $gameDir "done.txt"), (Join-Path $gameDir "shots"), (Join-Path $gameDir "butterscotch.log"), (Join-Path $gameDir "harness.txt")
 if ($Harness -ne "") { Copy-Item -Force $Harness (Join-Path $gameDir "harness.txt") }
+Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $gameDir "inputs.json")
+if ($Inputs -ne "") { Copy-Item -Force $Inputs (Join-Path $gameDir "inputs.json") }
+if ($ClearSaves) { Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $gameDir "sav*"), (Join-Path $gameDir "config.ini") }
+if ($Save -ne "") {
+    Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $gameDir "sav*")
+    Copy-Item -Force (Join-Path $Save "*") $gameDir
+}
 
 # Azahar settings: New 3DS, Vulkan (OpenGL hangs the UI on this host), no close prompt, CPU clock, log filter.
 $cfg = Join-Path $user "config\qt-config.ini"

@@ -10,6 +10,7 @@
 #include "../runner_gamepad.h"
 #include "../runner_mouse.h"
 
+#include "../input_recording.h"
 #include "../overlay_file_system.h"
 #include "n3ds_input.h"
 #include "n3ds_platform_config.h"
@@ -651,7 +652,10 @@ int main(int argc, char** argv) {
     N3DSLoadingScreen_free(&loadingScreen);
     VMContext* vm = VM_create(dataWin);
     Renderer* renderer = N3DSRenderer_create();
-    Runner* runner = Runner_create(dataWin, vm, renderer, fileSystem, audioSystem, (uint32_t) osGetTime());
+    // Input playback runs use a fixed seed, like the desktop runner with --seed 1, so both sides stay in step.
+    bool deterministic = fileExists(N3DS_SD_DIR "inputs.json");
+    if (deterministic) vm->hasFixedSeed = true;
+    Runner* runner = Runner_create(dataWin, vm, renderer, fileSystem, audioSystem, deterministic ? 1u : (uint32_t) osGetTime());
 
     if (!N3DSRenderer_isReady(renderer)) {
         const char* error = N3DSRenderer_getStartupError(renderer);
@@ -678,6 +682,10 @@ int main(int argc, char** argv) {
     arrput(gameArgs, safeStrdup(argc > 0 && argv[0] != NULL ? argv[0] : "butterscotch"));
     Runner_setGameArgs(runner, gameArgs, (int32_t) arrlen(gameArgs));
     N3DSInput_init(runner);
+    // Keyboard playback in the desktop --playback-inputs format (e.g. a converted TAS), for regression runs.
+    InputRecording* inputPlayback = NULL;
+    int32_t inputFrame = 0;
+    if (fileExists(N3DS_SD_DIR "inputs.json")) inputPlayback = InputRecording_createPlayer(N3DS_SD_DIR "inputs.json", NULL);
 
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
     Runner_initFirstRoom(runner);
@@ -708,6 +716,7 @@ int main(int argc, char** argv) {
         RunnerGamepad_beginFrame(runner->gamepads);
         RunnerMouse_beginFrame(runner->mouse);
         u32 down = N3DSInput_update(runner);
+        InputRecording_processFrame(inputPlayback, runner->keyboard, inputFrame++);
         if ((down & KEY_START) && (hidKeysHeld() & KEY_SELECT)) break;
         if ((down & KEY_SELECT) && (hidKeysHeld() & KEY_L)) debugMonitorVisible = !debugMonitorVisible;
 

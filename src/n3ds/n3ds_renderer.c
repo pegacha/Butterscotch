@@ -283,8 +283,16 @@ typedef struct {
 } N3DSSurface;
 
 typedef struct {
+    C3D_RenderTarget* target;
+    C3D_Tex texture;
+    uint32_t frame;
+} N3DSDeferredSurfaceFree;
+
+typedef struct {
     Renderer base;
     N3DSSurface* surfaces; // stb_ds array, index = surface id
+    N3DSDeferredSurfaceFree* deferredSurfaceFrees; // stb_ds array
+    uint32_t diagMappingLogs;
     int32_t currentTargetSurface; // RENDER_TARGET_HOST_FRAMEBUFFER = top screen
     float targetW;
     float targetH;
@@ -3233,6 +3241,9 @@ static void N3DSRenderer_init(Renderer* base, DataWin* dataWin) {
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     bool isNew3DS = false;
     base->dataWin = dataWin;
+    repeat(MATRICES_MAX, mi) {
+        Matrix4f_identity(&base->gmlMatrices[mi]);
+    }
     renderer->baseTPAGCount = dataWin != NULL ? dataWin->tpag.count : 0u;
     renderer->topTarget = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
 #ifndef N3DS_DISABLE_BOTTOM_SCREEN
@@ -4733,15 +4744,28 @@ static N3DSSurface* N3DSRenderer_getSurface(N3DSRenderer* renderer, int32_t surf
     return surface->exists ? surface : NULL;
 }
 
+// citro3d panics on C3D_RenderTargetDelete inside a frame, and GML frees surfaces from any event: targets and
+// textures are queued here and deleted between frames, two frames later (the GPU may still be reading them).
 static void N3DSRenderer_releaseSurfaceTexture(N3DSRenderer* renderer, N3DSSurface* surface) {
     N3DSRenderer_flushC2DQueue(renderer);
-    if (surface->target != NULL) {
-        C3D_RenderTargetDelete(surface->target);
-        surface->target = NULL;
-    }
-    if (surface->texture.data != NULL) {
-        C3D_TexDelete(&surface->texture);
-        memset(&surface->texture, 0, sizeof(surface->texture));
+    if (surface->target == NULL && surface->texture.data == NULL) return;
+    N3DSDeferredSurfaceFree pending = { .target = surface->target, .texture = surface->texture, .frame = renderer->frameSequence };
+    arrput(renderer->deferredSurfaceFrees, pending);
+    surface->target = NULL;
+    memset(&surface->texture, 0, sizeof(surface->texture));
+}
+
+void N3DSRenderer_collectGarbage(Renderer* base, bool all) {
+    N3DSRenderer* renderer = (N3DSRenderer*) base;
+    for (ptrdiff_t i = 0; i < arrlen(renderer->deferredSurfaceFrees);) {
+        N3DSDeferredSurfaceFree* pending = &renderer->deferredSurfaceFrees[i];
+        if (!all && renderer->frameSequence < pending->frame + 2u) {
+            i++;
+            continue;
+        }
+        if (pending->target != NULL) C3D_RenderTargetDelete(pending->target);
+        if (pending->texture.data != NULL) C3D_TexDelete(&pending->texture);
+        arrdelswap(renderer->deferredSurfaceFrees, i);
     }
 }
 
@@ -4802,7 +4826,8 @@ static int32_t N3DSRenderer_createSurface(Renderer* base, int32_t width, int32_t
     memset(surface, 0, sizeof(*surface));
     if (!N3DSRenderer_allocSurfaceTexture(renderer, surface, width, height)) return -1;
     surface->exists = true;
-    logInfo("N3DS: surface %d created %dx%d (%s)\n", (int) id, (int) width, (int) height, surface->inVRAM ? "vram" : "linear");
+    static uint32_t createLogs = 0;
+    if (createLogs++ < 16u) logInfo("N3DS: surface %d created %dx%d (%s)\n", (int) id, (int) width, (int) height, surface->inVRAM ? "vram" : "linear");
     return id;
 }
 
@@ -4846,6 +4871,7 @@ static int32_t N3DSRenderer_ensureApplicationSurface(Renderer* base, int32_t wid
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     int32_t id = base->runner->applicationSurfaceId;
     if (N3DSRenderer_getSurface(renderer, id) == NULL) {
+        if (id >= 0) logInfo("N3DS: application surface %d is gone, recreating\n", (int) id);
         id = N3DSRenderer_createSurface(base, width, height);
         base->runner->applicationSurfaceId = id;
         return id;
@@ -4902,6 +4928,11 @@ static void N3DSRenderer_updateMapping(N3DSRenderer* renderer) {
     }
     if (fabsf(m[1]) > 1e-6f || fabsf(m[4]) > 1e-6f) {
         N3DS_UNIMPL("viewRotation", "m1=%.3f m4=%.3f", m[1], m[4]);
+    }
+    if (renderer->diagMappingLogs < 12u) {
+        renderer->diagMappingLogs++;
+        logInfo("N3DS diag: map target=%d vp=%.0f,%.0f %.0fx%.0f x'=%.3fx+%.1f y'=%.3fy+%.1f m0=%.5f m5=%.5f m12=%.3f m13=%.3f\n",
+            (int) renderer->currentTargetSurface, renderer->vpX, renderer->vpY, renderer->vpW, renderer->vpH, ax, bx, ay, by, m[0], m[5], m[12], m[13]);
     }
     renderer->viewX = 0;
     renderer->viewY = 0;
@@ -5000,6 +5031,11 @@ static void N3DSRenderer_beginFrame(Renderer* base, int32_t gameW, int32_t gameH
     }
     C2D_TargetClear(renderer->topTarget, C2D_Color32(0, 0, 0, 255));
     N3DSRenderer_bindTarget(renderer, base->runner->applicationSurfaceId, true);
+#ifdef N3DS_DIAG_PATTERN
+    C2D_DrawRectSolid(10.0f, 10.0f, 0.5f, 20.0f, 20.0f, C2D_Color32(0, 255, 0, 255));
+    C2D_DrawRectSolid(0.0f, 200.0f, 0.5f, 40.0f, 40.0f, C2D_Color32(0, 0, 255, 255));
+    C2D_Flush();
+#endif
 }
 
 static void N3DSRenderer_endFrameInit(Renderer* base) {
@@ -5013,9 +5049,17 @@ static void N3DSRenderer_endFrameEnd(Renderer* base) {
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     Runner* runner = base->runner;
     N3DSRenderer_logPerfWindowIfNeeded(renderer);
-    if (runner->usingAppSurface && !runner->appSurfaceAutoDraw) return;
     N3DSSurface* app = N3DSRenderer_getSurface(renderer, runner->applicationSurfaceId);
+#ifdef N3DS_DIAG_PATTERN
+    if (renderer->frameSequence % 120u == 2u) {
+        logInfo("N3DS diag: present using=%d autoDraw=%d appId=%d app=%p tex=%p %ux%u target=%p\n", (int) runner->usingAppSurface, (int) runner->appSurfaceAutoDraw,
+            (int) runner->applicationSurfaceId, (void*) app, app ? app->texture.data : NULL, app ? app->texture.width : 0, app ? app->texture.height : 0, app ? (void*) app->target : NULL);
+    }
+#endif
+    if (runner->usingAppSurface && !runner->appSurfaceAutoDraw) return;
     if (app == NULL) return;
+    app->image.tex = &app->texture;
+    app->image.subtex = &app->subtex;
 
     N3DSRenderer_bindTarget(renderer, RENDER_TARGET_HOST_FRAMEBUFFER, true);
     int32_t lx, ly, lw, lh;
@@ -5029,6 +5073,9 @@ static void N3DSRenderer_endFrameEnd(Renderer* base) {
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
     C3D_TexSetFilter(&app->texture, scale == floorf(scale) ? GPU_NEAREST : GPU_LINEAR, scale == floorf(scale) ? GPU_NEAREST : GPU_LINEAR);
     C2D_DrawImageAt(app->image, dx, dy, 0.5f, NULL, scale, scale);
+#ifdef N3DS_DIAG_PATTERN
+    C2D_DrawRectSolid(0.0f, 0.0f, 0.5f, 20.0f, 20.0f, C2D_Color32(255, 0, 0, 255));
+#endif
     N3DSRenderer_flushC2DQueue(renderer);
     renderer->pendingC2DDraws = 1;
     N3DSRenderer_flushC2DQueue(renderer);
@@ -5114,6 +5161,13 @@ static bool N3DSRenderer_setRenderTarget(Renderer* base, int32_t surfaceID, bool
 }
 
 static void N3DSRenderer_drawSurfaceRegion(Renderer* base, N3DSSurface* surface, int32_t srcLeft, int32_t srcTop, int32_t srcWidth, int32_t srcHeight, float x, float y, float xscale, float yscale, float angleDeg, uint32_t color, float alpha) {
+    // Negative width = the whole surface (draw_surface / draw_surface_ext), as in the GL renderer.
+    if (0 > srcWidth) {
+        srcLeft = 0;
+        srcTop = 0;
+        srcWidth = surface->width;
+        srcHeight = surface->height;
+    }
     if (srcLeft < 0) { srcWidth += srcLeft; x -= (float) srcLeft * xscale; srcLeft = 0; }
     if (srcTop < 0) { srcHeight += srcTop; y -= (float) srcTop * yscale; srcTop = 0; }
     if (srcLeft + srcWidth > surface->width) srcWidth = surface->width - srcLeft;
@@ -5137,6 +5191,13 @@ static void N3DSRenderer_drawSurfaceRegion(Renderer* base, N3DSSurface* surface,
 static void N3DSRenderer_drawSurface(Renderer* base, int32_t surfaceID, int32_t srcLeft, int32_t srcTop, int32_t srcWidth, int32_t srcHeight, float x, float y, float xscale, float yscale, float angleDeg, uint32_t color, float alpha) {
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     N3DSSurface* surface = N3DSRenderer_getSurface(renderer, surfaceID);
+#ifdef N3DS_DIAG_PATTERN
+    if (renderer->frameSequence % 120u == 2u) {
+        logInfo("N3DS diag: drawSurface id=%d exists=%d src=%d,%d %dx%d at %.1f,%.1f scale %.2f,%.2f col=%06lx a=%.2f target=%d vp=%.0f,%.0f %.0fx%.0f map x'=%.2fx+%.1f y'=%.2fy+%.1f\n",
+            (int) surfaceID, surface != NULL, (int) srcLeft, (int) srcTop, (int) srcWidth, (int) srcHeight, x, y, xscale, yscale, (unsigned long) color, alpha,
+            (int) renderer->currentTargetSurface, renderer->vpX, renderer->vpY, renderer->vpW, renderer->vpH, renderer->viewScaleX, renderer->portOffsetX, renderer->viewScaleY, renderer->portOffsetY);
+    }
+#endif
     if (surface == NULL) return;
     if (surfaceID == renderer->currentTargetSurface) {
         N3DS_UNIMPL("drawSurface", "feedback surface=%d", (int) surfaceID);
@@ -5619,4 +5680,13 @@ bool N3DSRenderer_drawCachedTileEntry(Renderer* base, int32_t tileEntryIndex, fl
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     if (tileEntryIndex < 0 || (uint32_t) tileEntryIndex >= renderer->tileEntryCount) return false;
     return N3DSRenderer_drawPackedTileEntry(base, renderer, &renderer->tileEntries[tileEntryIndex], drawX, drawY, xscale, yscale, color, alpha);
+}
+
+void N3DSRenderer_logDiag(Renderer* base) {
+    N3DSRenderer* r = (N3DSRenderer*) base;
+    logInfo("N3DS diag: frame sprite=%lu part=%lu frag=%lu directHits=%lu texSwitch=%lu target=%d active=%d atlasPages=%lu resident=%lu\n",
+        (unsigned long) r->frameSpriteDrawCalls, (unsigned long) r->frameSpritePartDrawCalls, (unsigned long) r->frameFragmentDraws,
+        (unsigned long) r->frameDirectSpriteHits, (unsigned long) r->frameTextureSwitches, (int) r->currentTargetSurface, (int) r->activeSceneTarget,
+        (unsigned long) r->atlasPageCount, (unsigned long) r->residentAtlasPageCount);
+    r->diagMappingLogs = 0;
 }

@@ -1,0 +1,2 @@
+screenshot 120
+exit 130

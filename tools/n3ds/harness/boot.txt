@@ -1,0 +1,6 @@
+# Boot smoke test: screenshots through the intro, then quit.
+screenshot 60
+screenshot 300
+screenshot 600
+screenshot 900
+exit 960

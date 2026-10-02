@@ -44,3 +44,6 @@ bool N3DSRenderer_drawCachedTileEntry(Renderer* renderer, int32_t tileEntryIndex
 // Loads the textures a room is likely to need (call when the room changes).
 void N3DSRenderer_prewarmRoom(Renderer* renderer, Runner* runner);
 C3D_RenderTarget* N3DSRenderer_getTopTarget(Renderer* renderer);
+// Deletes surfaces freed during earlier frames. Call outside C3D_FrameBegin/End; all = everything (shutdown).
+void N3DSRenderer_collectGarbage(Renderer* renderer, bool all);
+void N3DSRenderer_logDiag(Renderer* renderer);

@@ -51,3 +51,8 @@ if(EXISTS "${N3DS_ROMFS_DIR}")
 else()
     ctr_create_3dsx(butterscotch_3dsx TARGET butterscotch OUTPUT butterscotch.3dsx SMDH "${N3DS_SMDH_FILE}")
 endif()
+
+option(N3DS_DIAG_PATTERN "Draw renderer test squares (debug)" OFF)
+if(N3DS_DIAG_PATTERN)
+    target_compile_definitions(butterscotch PRIVATE N3DS_DIAG_PATTERN)
+endif()

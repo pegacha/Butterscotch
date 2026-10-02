@@ -645,6 +645,8 @@ int main(int argc, char** argv) {
     AudioSystem* audioSystem = (AudioSystem*) NoopAudioSystem_create();
 
     N3DSLoadingScreen_set(&loadingScreen, "Initializing renderer", 2, 2);
+    // Deleting a screen target unlinks that screen: the loading screen's target must go before the renderer makes its own.
+    N3DSLoadingScreen_free(&loadingScreen);
     VMContext* vm = VM_create(dataWin);
     Renderer* renderer = N3DSRenderer_create();
     Runner* runner = Runner_create(dataWin, vm, renderer, fileSystem, audioSystem, (uint32_t) osGetTime());
@@ -652,11 +654,16 @@ int main(int argc, char** argv) {
     if (!N3DSRenderer_isReady(renderer)) {
         const char* error = N3DSRenderer_getStartupError(renderer);
         logError("Renderer: %s\n", error != NULL ? error : "init failed");
-        N3DS_waitForStartExitScreen(&loadingScreen, error != NULL ? error : "Renderer init failed. Press START.");
+        consoleInit(GFX_BOTTOM, NULL);
+        printf("%s\nPress START to exit.\n", error != NULL ? error : "Renderer init failed");
+        while (aptMainLoop()) {
+            hidScanInput();
+            if (hidKeysDown() & KEY_START) break;
+            gspWaitForVBlank();
+        }
         return 1;
     }
 
-    N3DSLoadingScreen_free(&loadingScreen);
     N3DSDebugMonitor debugMonitor;
     N3DSDebugMonitor_init(&debugMonitor);
 
@@ -670,7 +677,11 @@ int main(int argc, char** argv) {
     Runner_setGameArgs(runner, gameArgs, (int32_t) arrlen(gameArgs));
     N3DSInput_init(runner);
 
+    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
     Runner_initFirstRoom(runner);
+    renderer->vtable->flush(renderer);
+    C3D_FrameEnd(0);
+    N3DSRenderer_collectGarbage(renderer, false);
     N3DS_logMemory("first room");
 
     bool debugMonitorVisible = true;
@@ -698,6 +709,8 @@ int main(int argc, char** argv) {
         if ((down & KEY_START) && (hidKeysHeld() & KEY_SELECT)) break;
         if ((down & KEY_SELECT) && (hidKeysHeld() & KEY_L)) debugMonitorVisible = !debugMonitorVisible;
 
+        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+        N3DSScreenshot_captureIfRequested(renderer);
         u64 stepStartTick = svcGetSystemTick();
         Runner_step(runner);
         float dt = (float) (runner->deltaTime / 1000000.0);
@@ -729,8 +742,6 @@ int main(int argc, char** argv) {
         int32_t gameH = runner->applicationHeight;
 
         u64 drawStartTick = svcGetSystemTick();
-        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
-        N3DSScreenshot_captureIfRequested(renderer);
         Runner_drawPre(runner, N3DS_TOP_SCREEN_W, N3DS_TOP_SCREEN_H);
         Runner_beginFrame(runner, gameW, gameH, N3DS_TOP_SCREEN_W, N3DS_TOP_SCREEN_H, N3DS_TOP_SCREEN_W, N3DS_TOP_SCREEN_H);
         Runner_drawViews(runner, gameW, gameH, false);
@@ -738,13 +749,16 @@ int main(int argc, char** argv) {
         Runner_drawPost(runner, N3DS_TOP_SCREEN_W, N3DS_TOP_SCREEN_H);
         renderer->vtable->endFrameEnd(renderer);
         Runner_drawGUI(runner, N3DS_TOP_SCREEN_W, N3DS_TOP_SCREEN_H, gameW, gameH);
+        if (runner->frameCount % 300 == 5) N3DSRenderer_logDiag(renderer);
         if (debugMonitorVisible) N3DSDebugMonitor_draw(&debugMonitor, runner, renderer);
         renderer->vtable->flush(renderer);
+        Runner_handlePendingRoomChange(runner);
+        renderer->vtable->flush(renderer);
         C3D_FrameEnd(0);
+        N3DSRenderer_collectGarbage(renderer, false);
         double drawMs = (double) (svcGetSystemTick() - drawStartTick) * 1000.0 / (double) SYSCLOCK_ARM11;
         N3DSDebugMonitor_tickFrame(&debugMonitor, drawMs);
 
-        Runner_handlePendingRoomChange(runner);
         if (N3DSInput_exitRequested()) {
             FILE* done = fopen(N3DS_SD_DIR "done.txt", "w");
             if (done != NULL) {

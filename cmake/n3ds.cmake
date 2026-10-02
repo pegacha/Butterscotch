@@ -5,7 +5,7 @@
 # The game's files stay on the SD card in sdmc:/3ds/<N3DS_SD_FOLDER>/ and do not change between builds.
 
 option(N3DS_ENABLE_LTO "Enable link-time optimization for the 3DS target" ON)
-option(N3DS_ENABLE_AUDIO "Build the NDSP audio system (BCWAV from n3ds-preprocess)" OFF)
+option(N3DS_ENABLE_AUDIO "NDSP audio (sound_bank.bin + streamed BCWAV music from n3ds-preprocess)" ON)
 set(N3DS_APP_NAME "Butterscotch" CACHE STRING "3DS title name (SMDH / CIA)")
 set(N3DS_APP_DESCRIPTION "GameMaker runner" CACHE STRING "3DS title description (SMDH)")
 set(N3DS_APP_AUTHOR "Butterscotch" CACHE STRING "3DS title author (SMDH)")

@@ -3,6 +3,8 @@
 #include "n3ds_platform_config.h"
 
 #include "../data_win.h"
+#include "../log.h"
+#include "../runner.h"
 #include "../utils.h"
 
 #include <3ds.h>
@@ -12,6 +14,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+
+// Loop counters here are often over const fields; drop the qualifier from the counter type.
+#undef repeat
+#define repeat(n, it) for (__typeof__((n) + 0) it = 0; it < (n); ++it)
 
 #define N3DS_ENABLE_LOGGING 0
 
@@ -48,8 +54,8 @@
 #define N3DS_FORCE_PCM_BCWAV_PLAYBACK 0
 #define N3DS_ROMFS_AUDIO_BASE "romfs:/audio"
 #define N3DS_ROMFS_MUSIC_BASE "romfs:/"
-#define N3DS_SDMC_AUDIO_BASE "sdmc:/3ds/cinnamon/audio"
-#define N3DS_SDMC_MUSIC_BASE "sdmc:/3ds/cinnamon"
+#define N3DS_SDMC_AUDIO_BASE N3DS_SD_DIR "audio"
+#define N3DS_SDMC_MUSIC_BASE N3DS_SD_DIR "audio"
 #define N3DS_MAX_MISSING_AUDIO_PATHS 512
 #define N3DS_SOUND_BANK_MAGIC 0x314B4253u /* SBK1 */
 #define N3DS_SOUND_BANK_VERSION_BCWAV 1u
@@ -176,6 +182,7 @@ typedef struct {
     bool headerAvailable;
     bool pathAttempted;
     bool blobOwned;
+    bool blobInLinearBank; // points into the bank, which is in linear memory: the DSP plays it in place
     char* path;
     uint8_t* blob;
     uint8_t* nativeBlob;
@@ -196,6 +203,7 @@ struct N3DSAudioSystem {
     FileSystem* fileSystem;
     bool initialized;
     float masterGain;
+    float groupGains[32];
     N3DSStreamEntry streams[N3DS_MAX_STREAMS];
     N3DSSoundInstance instances[N3DS_MAX_SOUND_INSTANCES];
     N3DSCachedSound* cachedSounds;
@@ -442,7 +450,8 @@ static bool N3DSAudio_loadPackedSoundBank(N3DSAudioSystem* audio) {
     N3DSPackedSoundBankEntry* entries = NULL;
     bool loaded = false;
 
-    if (!N3DSAudio_readFileFully(path, &bankData, &bankSize)) goto cleanup;
+    // Read once into linear memory: DSP-ADPCM entries then play in place (no per-sound copies or SD reads).
+    if (!N3DSAudio_readFileFullyLinear(path, &bankData, &bankSize)) goto cleanup;
     if (bankSize < 16u) goto cleanup;
     if (N3DSAudio_readU32(bankData + 0u) != N3DS_SOUND_BANK_MAGIC) goto cleanup;
     uint32_t version = N3DSAudio_readU32(bankData + 4u);
@@ -492,7 +501,7 @@ static bool N3DSAudio_loadPackedSoundBank(N3DSAudioSystem* audio) {
     );
 
 cleanup:
-    free(bankData);
+    if (bankData != NULL) linearFree(bankData);
     free(entries);
     free(path);
     return loaded;
@@ -699,8 +708,11 @@ static bool N3DSAudio_soundLooksLikeSfx(const Sound* sound) {
         N3DSAudio_stringContainsIgnoreCase(sound->type, "effect");
 }
 
+// Streamed (music) = not embedded in data.win, GameMaker's own rule and the one n3ds-preprocess uses: those
+// play from <game>/audio/<name>.bcwav on the card. Names only decide for embedded sounds.
 static bool N3DSAudio_soundLooksLikeMusic(const Sound* sound) {
     if (sound == NULL) return false;
+    if ((sound->flags & AUDIO_ENTRY_FLAG_IS_EMBEDDED) == 0 && sound->file != NULL && sound->file[0] != '\0') return true;
     if (N3DSAudio_soundLooksLikeSfx(sound)) return false;
     return N3DSAudio_nameLooksLikeMusic(sound->name) ||
         N3DSAudio_nameLooksLikeMusic(sound->file) ||
@@ -711,8 +723,8 @@ static bool N3DSAudio_soundLooksLikeMusic(const Sound* sound) {
 static bool N3DSAudio_pathLooksLikeBundledMusic(const char* path) {
     if (path == NULL) return false;
     if (N3DSAudio_pathStartsWith(path, "romfs:/audio/")) return false;
-    if (N3DSAudio_pathStartsWith(path, "sdmc:/3ds/cinnamon/audio/")) return false;
-    return N3DSAudio_pathStartsWith(path, "romfs:/") || N3DSAudio_pathStartsWith(path, "sdmc:/3ds/cinnamon/");
+    if (N3DSAudio_pathStartsWith(path, N3DS_SD_DIR "audio/")) return false;
+    return N3DSAudio_pathStartsWith(path, "romfs:/") || N3DSAudio_pathStartsWith(path, N3DS_SD_DIR);
 }
 
 static bool N3DSAudio_extractBaseNameNoExt(const char* value, char* out, size_t outSize) {
@@ -1196,20 +1208,29 @@ static bool N3DSAudio_nonStreamPlaybackFinished(const N3DSSoundInstance* inst, u
     return true;
 }
 
+static float N3DSAudio_groupGain(N3DSAudioSystem* audio, const N3DSSoundInstance* inst) {
+    DataWin* dw = audio->base.audioGroups != NULL ? audio->base.audioGroups[0] : NULL;
+    if (dw == NULL || inst->soundIndex < 0 || (uint32_t) inst->soundIndex >= dw->sond.count) return 1.0f;
+    int32_t group = (int32_t) dw->sond.sounds[inst->soundIndex].audioGroup;
+    if (group < 0 || group >= 32) return 1.0f;
+    return audio->groupGains[group];
+}
+
 static void N3DSAudio_applyMix(N3DSAudioSystem* audio, N3DSSoundInstance* inst) {
     float mix[12];
     memset(mix, 0, sizeof(mix));
     inst->gain = N3DSAudio_sanitizeGain(inst->gain);
+    float masterGain = audio->masterGain * N3DSAudio_groupGain(audio, inst);
     if (inst->useNativeAdpcm && inst->secondaryChannelId >= 0) {
-        mix[0] = inst->gain * audio->masterGain;
+        mix[0] = inst->gain * masterGain;
         ndspChnSetMix(inst->channelId, mix);
 
         memset(mix, 0, sizeof(mix));
-        mix[1] = inst->gain * audio->masterGain;
+        mix[1] = inst->gain * masterGain;
         ndspChnSetMix(inst->secondaryChannelId, mix);
     } else {
-        mix[0] = inst->gain * audio->masterGain;
-        mix[1] = inst->gain * audio->masterGain;
+        mix[0] = inst->gain * masterGain;
+        mix[1] = inst->gain * masterGain;
         ndspChnSetMix(inst->channelId, mix);
     }
 
@@ -1262,13 +1283,14 @@ static void N3DSAudio_releaseCachedSound(N3DSCachedSound* cachedSound) {
     if (cachedSound == NULL) return;
     free(cachedSound->path);
     if (cachedSound->blobOwned) free(cachedSound->blob);
-    if (cachedSound->nativeBlob != NULL) linearFree(cachedSound->nativeBlob);
+    if (cachedSound->nativeBlob != NULL && !cachedSound->blobInLinearBank) linearFree(cachedSound->nativeBlob);
     memset(cachedSound, 0, sizeof(*cachedSound));
 }
 
 static uint8_t* N3DSAudio_getCachedNativeBlob(N3DSCachedSound* cachedSound) {
     if (cachedSound == NULL || !cachedSound->available || cachedSound->blob == NULL || cachedSound->blobSize == 0) return NULL;
     if (cachedSound->nativeBlob != NULL) return cachedSound->nativeBlob;
+    if (cachedSound->blobInLinearBank) return cachedSound->blob;
 
     cachedSound->nativeBlob = N3DSAudio_cloneBlobToLinear(cachedSound->blob, cachedSound->blobSize);
     return cachedSound->nativeBlob;
@@ -1294,12 +1316,12 @@ static bool N3DSAudio_tryCacheSoundBlob(N3DSAudioSystem* audio, int32_t soundInd
         N3DSAudio_getPackedSoundBlob(audio, soundIndex, &packedBlob, &packedBlobSize)) {
         N3DSBcwav bcwav;
         if (!N3DSAudio_parseBcwavBlob(packedBlob, packedBlobSize, &bcwav)) return false;
-        if (!N3DSAudio_shouldPrewarmCachedSound(sound, &bcwav)) return false;
 
         cachedSound->available = true;
         cachedSound->headerAttempted = true;
         cachedSound->headerAvailable = true;
         cachedSound->blobOwned = false;
+        cachedSound->blobInLinearBank = true;
         cachedSound->blob = (uint8_t*) packedBlob;
         cachedSound->blobSize = packedBlobSize;
         cachedSound->bcwav = bcwav;
@@ -2799,6 +2821,7 @@ static void N3DSAudio_init(AudioSystem* base, DataWin* dataWin, FileSystem* file
     LightEvent_Init(&audio->workerEvent, RESET_STICKY);
     audio->fileSystem = fileSystem;
     audio->masterGain = 1.0f;
+    repeat(32, g) audio->groupGains[g] = 1.0f;
     audio->base.audioGroups = safeCalloc(1, sizeof(DataWin*));
     audio->base.audioGroups[0] = dataWin;
     if (R_SUCCEEDED(APT_CheckNew3DS(&isNew3DS))) {
@@ -2814,8 +2837,15 @@ static void N3DSAudio_init(AudioSystem* base, DataWin* dataWin, FileSystem* file
     audio->backgroundPrewarmByteBudget = audio->isNew3DS ? N3DS_BACKGROUND_PREWARM_BYTE_BUDGET_NEW3DS : N3DS_BACKGROUND_PREWARM_BYTE_BUDGET_OLD3DS;
     N3DSAudio_loadPackedSoundBank(audio);
 
-    ndspInit();
+    Result ndspResult = ndspInit();
+    if (R_FAILED(ndspResult)) {
+        logError("N3DS audio: ndspInit failed (0x%08lx): no sound. Real consoles need sdmc:/3ds/dspfirm.cdc (dump it with DSP1).\n", (unsigned long) ndspResult);
+    }
     ndspSetOutputMode(NDSP_OUTPUT_STEREO);
+    logInfo("N3DS audio: %lu sounds, bank %lu KB (%s), preload cap %lu KB\n", (unsigned long) dataWin->sond.count,
+        (unsigned long) (audio->packedSoundBankSize / 1024u),
+        audio->packedSoundBankData == NULL ? "missing" : (audio->packedSoundBankVersion == N3DS_SOUND_BANK_VERSION_PCM16 ? "v2" : "v1"),
+        (unsigned long) (audio->maxCachedSoundBytes / 1024u));
     N3DSDebugLog_event(
         "audio",
         "init model=%s cacheCapKB=%lu packedBankKB=%lu",
@@ -2844,6 +2874,16 @@ static void N3DSAudio_init(AudioSystem* base, DataWin* dataWin, FileSystem* file
 #else
     audio->cachedSounds = safeCalloc(dataWin->sond.count, sizeof(N3DSCachedSound));
     audio->cachedSoundCount = dataWin->sond.count;
+    // Every bank entry is resident: resolve them all now (header parse only), so playing a sound never touches
+    // the SD card or allocates.
+    uint32_t bankResolved = 0;
+    repeat(audio->packedSoundBankEntryCount, bankIndex) {
+        if (bankIndex >= dataWin->sond.count) break;
+        const N3DSPackedSoundBankEntry* entry = N3DSAudio_getPackedSoundEntry(audio, (int32_t) bankIndex);
+        if (entry == NULL || entry->size == 0) continue;
+        if (N3DSAudio_tryCacheSoundBlob(audio, (int32_t) bankIndex)) bankResolved++;
+    }
+    logInfo("N3DS audio: %lu sound effects resident in the bank\n", (unsigned long) bankResolved);
     fprintf(stderr, "N3DSAudio: eager preload disabled; sounds will cache on first use or the worker thread\n");
 #endif
 
@@ -2894,7 +2934,7 @@ static void N3DSAudio_destroy(AudioSystem* base) {
     }
     free(audio->cachedSounds);
     free(audio->packedSoundBankEntries);
-    free(audio->packedSoundBankData);
+    if (audio->packedSoundBankData != NULL) linearFree(audio->packedSoundBankData);
     ndspExit();
     free(audio->base.audioGroups);
     free(audio);
@@ -3248,7 +3288,7 @@ static int32_t N3DSAudio_playSound(AudioSystem* base, int32_t soundIndex, MAYBE_
     return instanceId;
 }
 
-static void N3DSAudio_prewarmRoom(AudioSystem* base, MAYBE_UNUSED Runner* runner) {
+void N3DSAudio_prewarmRoom(AudioSystem* base, MAYBE_UNUSED Runner* runner) {
 #if !N3DS_EAGER_SFX_PRELOAD
     N3DSAudioSystem* audio = (N3DSAudioSystem*) base;
     LightLock_Lock(&audio->lock);
@@ -3683,6 +3723,31 @@ static void N3DSAudio_setMasterGain(AudioSystem* base, float gain) {
 }
 
 static void N3DSAudio_setChannelCount(MAYBE_UNUSED AudioSystem* base, MAYBE_UNUSED int32_t count) {}
+
+static void N3DSAudio_setMasterGainForListener(AudioSystem* base, float gain, MAYBE_UNUSED int32_t listenerId) {
+    N3DSAudio_setMasterGain(base, gain);
+}
+
+// Fades are not implemented for groups: the new gain applies at once.
+static void N3DSAudio_setGroupGain(AudioSystem* base, int32_t groupIndex, float gain, MAYBE_UNUSED uint32_t timeMs) {
+    N3DSAudioSystem* audio = (N3DSAudioSystem*) base;
+    if (groupIndex < 0 || groupIndex >= 32) return;
+    LightLock_Lock(&audio->lock);
+    audio->groupGains[groupIndex] = N3DSAudio_sanitizeGain(gain);
+    repeat(N3DS_MAX_SOUND_INSTANCES, i) {
+        if (audio->instances[i].active) N3DSAudio_applyMix(audio, &audio->instances[i]);
+    }
+    LightLock_Unlock(&audio->lock);
+}
+
+// 3D audio emitters/listener: played without positioning.
+static void N3DSAudio_setSoundSpatial(MAYBE_UNUSED AudioSystem* base, MAYBE_UNUSED int32_t instanceId, MAYBE_UNUSED float x, MAYBE_UNUSED float y, MAYBE_UNUSED float z, MAYBE_UNUSED float ref, MAYBE_UNUSED float max, MAYBE_UNUSED float factor) {
+    static bool warned = false;
+    if (!warned) logWarn("N3DS audio: positional audio is played unpositioned\n");
+    warned = true;
+}
+
+static void N3DSAudio_setListenerPosition(MAYBE_UNUSED AudioSystem* base, MAYBE_UNUSED float x, MAYBE_UNUSED float y, MAYBE_UNUSED float z) {}
 static void N3DSAudio_groupLoad(MAYBE_UNUSED AudioSystem* base, MAYBE_UNUSED int32_t groupIndex) {}
 static bool N3DSAudio_groupIsLoaded(MAYBE_UNUSED AudioSystem* base, MAYBE_UNUSED int32_t groupIndex) { return true; }
 
@@ -3790,7 +3855,12 @@ static AudioSystemVtable N3DSAudio_vtable = {
     .groupIsLoaded = N3DSAudio_groupIsLoaded,
     .createStream = N3DSAudio_createStream,
     .destroyStream = N3DSAudio_destroyStream,
-    .prewarmRoom = N3DSAudio_prewarmRoom,
+    .setSoundSpatial = N3DSAudio_setSoundSpatial,
+    .setListenerPosition = N3DSAudio_setListenerPosition,
+    .suspend = N3DSAudio_pauseAll,
+    .resume = N3DSAudio_resumeAll,
+    .setMasterGainForListener = N3DSAudio_setMasterGainForListener,
+    .setGroupGain = N3DSAudio_setGroupGain,
 };
 
 N3DSAudioSystem* N3DSAudioSystem_create(void) {

@@ -12,3 +12,10 @@ void N3DSAudioSystem_getCacheStats(
     uint32_t* outCachedBytes,
     uint32_t* outCacheLimitBytes
 );
+
+#ifndef RUNNER_DEFINED
+#define RUNNER_DEFINED
+typedef struct Runner Runner;
+#endif
+// Loads the sounds a room is likely to need (call when the room changes).
+void N3DSAudio_prewarmRoom(AudioSystem* audio, Runner* runner);

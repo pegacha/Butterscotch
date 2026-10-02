@@ -59,7 +59,7 @@ if (-not (Test-Path $built)) { throw "no build output at $built" }
 # Stage: copy the game folder over (no deletes: saves and config the game wrote stay).
 New-Item -ItemType Directory -Force $gameDir | Out-Null
 $stageWin = "\\wsl.localhost\$Distro" + ($SdInWsl -replace "/", "\")
-& robocopy $stageWin $gameDir /E /XD shots audio /XF log.txt done.txt harness.txt inputs.json atlas_trace.log /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
+& robocopy $stageWin $gameDir /E /XD shots /XF log.txt done.txt harness.txt inputs.json atlas_trace.log /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed ($LASTEXITCODE)" }
 if ($Use3dsx) { Copy-Item -Force $built (Join-Path $gameDir "$Game.3dsx") }
 Remove-Item -Force -Recurse -ErrorAction SilentlyContinue (Join-Path $gameDir "done.txt"), (Join-Path $gameDir "shots"), (Join-Path $gameDir "log.txt"), (Join-Path $gameDir "harness.txt")

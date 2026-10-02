@@ -12,6 +12,7 @@
 
 #include "../input_recording.h"
 #include "../overlay_file_system.h"
+#include "n3ds_audio_system.h"
 #include "n3ds_cached_file_system.h"
 #include "n3ds_input.h"
 #include "n3ds_platform_config.h"
@@ -527,7 +528,11 @@ int main(int argc, char** argv) {
     logInfo("Files: %s (saves %s)\n", dataWinDir, N3DS_SD_DIR);
     free(dataWinDir);
     free(dataWinPath);
+#ifdef N3DS_ENABLE_AUDIO
+    AudioSystem* audioSystem = (AudioSystem*) N3DSAudioSystem_create(); // initialised by Runner_create
+#else
     AudioSystem* audioSystem = (AudioSystem*) NoopAudioSystem_create();
+#endif
 
     N3DSLoadingScreen_set(&loadingScreen, "Initializing renderer", 2, 2);
     // Deleting a screen target unlinks that screen: the loading screen's target must go before the renderer makes its own.
@@ -637,6 +642,9 @@ int main(int argc, char** argv) {
             logInfo("Room %d: %s (%dx%d, speed %d)\n", (int) runner->currentRoomIndex, runner->currentRoom->name,
                 (int) runner->currentRoom->width, (int) runner->currentRoom->height, (int) runner->currentRoom->speed);
             N3DSRenderer_prewarmRoom(renderer, runner);
+#ifdef N3DS_ENABLE_AUDIO
+            N3DSAudio_prewarmRoom(runner->audioSystem, runner);
+#endif
             N3DS_logMemory("room start");
         }
 

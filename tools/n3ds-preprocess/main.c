@@ -155,6 +155,7 @@ typedef struct {
     const char* borderAssetDir;
     const char* pageFormatOverridesPath;
     bool keepPng;
+    bool pcm16SoundBank;
     bool dumpPagePreviews;
     bool enableTargetedBattleDialogueMono;
     bool interactiveMode;
@@ -353,6 +354,10 @@ static bool parseArgs(int argc, char** argv, Options* out) {
     applyDefaultToolPaths(out);
 
     for (int i = 3; i < argc; ++i) {
+        if (strcmp(argv[i], "--pcm16-sound-bank") == 0) {
+            out->pcm16SoundBank = true;
+            continue;
+        }
         if (strcmp(argv[i], "--keep-png") == 0) {
             out->keepPng = true;
             continue;
@@ -4078,6 +4083,8 @@ static bool soundLooksLikeSfx(const Sound* sound) {
 
 static N3DS_PREPROCESS_MAYBE_UNUSED bool soundLooksLikeMusic(const Sound* sound) {
     if (sound == NULL) return false;
+    // Not embedded in data.win = an external file the game streams (e.g. AM2R's musXXX.ogg).
+    if ((sound->flags & AUDIO_ENTRY_FLAG_IS_EMBEDDED) == 0 && sound->file != NULL && sound->file[0] != '\0') return true;
     if (soundLooksLikeSfx(sound)) return false;
     return nameLooksLikeMusic(sound->name) ||
         nameLooksLikeMusic(sound->file) ||
@@ -4592,7 +4599,9 @@ static void freeEncodedChannel(EncodedBcwavChannel* channel) {
     memset(channel, 0, sizeof(*channel));
 }
 
-static N3DS_PREPROCESS_MAYBE_UNUSED bool writeBcwavFile(const char* path, const WavPcm16* wav) {
+static bool buildBcwavBlob(const WavPcm16* wav, uint8_t** outBlob, uint32_t* outSize) {
+    *outBlob = NULL;
+    *outSize = 0;
     EncodedBcwavChannel channels[2];
     memset(channels, 0, sizeof(channels));
     bool ok = false;
@@ -4688,11 +4697,21 @@ static N3DS_PREPROCESS_MAYBE_UNUSED bool writeBcwavFile(const char* path, const 
         dataCursor += channels[channelIndex].dataSize;
     }
 
-    ok = writeBytesToFile(path, blob, fileSize);
-    free(blob);
+    *outBlob = blob;
+    *outSize = fileSize;
+    ok = true;
 
 cleanup:
     repeat(2, i) freeEncodedChannel(&channels[i]);
+    return ok;
+}
+
+static N3DS_PREPROCESS_MAYBE_UNUSED bool writeBcwavFile(const char* path, const WavPcm16* wav) {
+    uint8_t* blob = NULL;
+    uint32_t size = 0;
+    if (!buildBcwavBlob(wav, &blob, &size)) return false;
+    bool ok = writeBytesToFile(path, blob, size);
+    free(blob);
     return ok;
 }
 
@@ -4834,10 +4853,23 @@ static bool buildPackedSoundBank(Options* options, DataWin* dataWin) {
         uint32_t sampleRate = pcm.sampleRate != 0 ? pcm.sampleRate : N3DS_AUDIO_SAMPLE_RATE;
         uint32_t sampleCount = pcm.sampleCount;
         uint32_t channelCount = pcm.channelCount;
-        uint32_t pcmBytes = (uint32_t) ((size_t) pcm.sampleCount * pcm.channelCount * sizeof(int16_t));
-        if (fwrite(pcm.interleavedPcm, 1, pcmBytes, bankFile) != pcmBytes) {
-            freeWavPcm16(&pcm);
-            goto cleanup;
+        uint32_t pcmBytes = 0;
+        uint32_t entryFlags = channelCount;
+        if (options->pcm16SoundBank) {
+            pcmBytes = (uint32_t) ((size_t) pcm.sampleCount * pcm.channelCount * sizeof(int16_t));
+            if (fwrite(pcm.interleavedPcm, 1, pcmBytes, bankFile) != pcmBytes) {
+                freeWavPcm16(&pcm);
+                goto cleanup;
+            }
+            entryFlags |= N3DS_SOUND_BANK_ENTRY_FLAG_PCM16;
+        } else {
+            uint8_t* bcwav = NULL;
+            if (!buildBcwavBlob(&pcm, &bcwav, &pcmBytes) || fwrite(bcwav, 1, pcmBytes, bankFile) != pcmBytes) {
+                free(bcwav);
+                freeWavPcm16(&pcm);
+                goto cleanup;
+            }
+            free(bcwav);
         }
         freeWavPcm16(&pcm);
 
@@ -4845,10 +4877,7 @@ static bool buildPackedSoundBank(Options* options, DataWin* dataWin) {
         sizes[soundIndex] = pcmBytes;
         sampleRates[soundIndex] = sampleRate;
         sampleCounts[soundIndex] = sampleCount;
-        flags[soundIndex] =
-            channelCount |
-            N3DS_SOUND_BANK_ENTRY_FLAG_PCM16 |
-            0u;
+        flags[soundIndex] = entryFlags;
         cursor += pcmBytes;
         packedCount += 1u;
         packedBytes += pcmBytes;
@@ -4908,7 +4937,7 @@ static bool convertStreamedMusicBcwavs(Options* options, DataWin* dataWin) {
         if (!haveBaseName) snprintf(baseName, sizeof(baseName), "sound_%05zu", soundIndex);
 
         char outPath[1024];
-        snprintf(outPath, sizeof(outPath), "%s/%s.bcwav", options->outputDir, baseName);
+        snprintf(outPath, sizeof(outPath), "%s/audio/%s.bcwav", options->outputDir, baseName);
 
         char* externalSourcePath = resolveExternalSoundPath(options, sound);
         if (externalSourcePath == NULL) {
@@ -4960,7 +4989,7 @@ static bool convertAudio(Options* options, DataWin* dataWin) {
 
     bool ok = convertStreamedMusicBcwavs(options, dataWin);
     if (ok) ok = buildPackedSoundBank(options, dataWin);
-    if (ok) fprintf(stderr, "Packed SFX audio into PCM16 sound_bank.bin at %u Hz\n", N3DS_AUDIO_SAMPLE_RATE);
+    if (ok) fprintf(stderr, "Packed SFX audio into %s sound_bank.bin at %u Hz\n", options->pcm16SoundBank ? "PCM16" : "DSP-ADPCM", N3DS_AUDIO_SAMPLE_RATE);
     return ok;
 }
 

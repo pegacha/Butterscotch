@@ -71,7 +71,8 @@ static inline bool Renderer_isFiniteFloat(float v) { return isfinite(v); }
 // battle screen offset
 #define N3DS_TOP_BATTLE_SCENE_Y_OFFSET 200.0f
 #define N3DS_TOP_BATTLE_ENEMY_Y_OFFSET 200.0f
-#define N3DS_C2D_FLUSH_DRAW_BUDGET 192u
+// Flushing doesn't free citro2d buffer space (that resets per frame), it only adds GPU draw calls.
+#define N3DS_C2D_FLUSH_DRAW_BUDGET 2048u
 #define N3DS_PERF_LOG_INTERVAL_FRAMES 30u
 #define N3DS_ATLAS_TRACE_LOG_PATH N3DS_SD_DIR "atlas_trace.log"
 

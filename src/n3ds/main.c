@@ -10,7 +10,7 @@
 #include "../runner_gamepad.h"
 #include "../runner_mouse.h"
 
-#include "n3ds_file_system.h"
+#include "../overlay_file_system.h"
 #include "n3ds_input.h"
 #include "n3ds_platform_config.h"
 #include "n3ds_renderer.h"
@@ -637,9 +637,11 @@ int main(int argc, char** argv) {
         (int) gen8->defaultWindowWidth, (int) gen8->defaultWindowHeight);
     N3DS_logMemory("data.win parsed");
 
+    // Game files next to data.win (romfs or the SD folder), saves in the SD folder: upstream's overlay file system.
     char* dataWinDir = safeStrdup(dataWinPath);
     bsGetDirname(dataWinDir);
-    FileSystem* fileSystem = (FileSystem*) N3DSFileSystem_create("romfs:/", N3DS_SD_DIR);
+    FileSystem* fileSystem = (FileSystem*) OverlayFileSystem_create(dataWinDir, N3DS_SD_DIR);
+    logInfo("Files: %s (saves %s)\n", dataWinDir, N3DS_SD_DIR);
     free(dataWinDir);
     free(dataWinPath);
     AudioSystem* audioSystem = (AudioSystem*) NoopAudioSystem_create();
@@ -795,7 +797,7 @@ int main(int argc, char** argv) {
     audioSystem->vtable->destroy(audioSystem);
     renderer->vtable->destroy(renderer);
     Runner_free(runner);
-    N3DSFileSystem_destroy((N3DSFileSystem*) fileSystem);
+    OverlayFileSystem_destroy((OverlayFileSystem*) fileSystem);
     VM_free(vm);
     DataWin_free(dataWin);
     N3DSLog_close();

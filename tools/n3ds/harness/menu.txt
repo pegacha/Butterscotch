@@ -1,0 +1,16 @@
+# Title -> menus exploration
+screenshot 1000
+press 1010 START 4
+screenshot 1100
+press 1110 START 4
+screenshot 1200
+press 1210 A 4
+screenshot 1300
+press 1310 A 4
+screenshot 1400
+press 1410 START 4
+screenshot 1500
+press 1510 A 4
+screenshot 1650
+screenshot 1900
+exit 1910

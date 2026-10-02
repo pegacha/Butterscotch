@@ -1,0 +1,23 @@
+# Title -> new game (slot A, normal) -> skip intro -> walk around the first area
+press 1010 START 4
+press 1110 START 4
+press 1210 A 4
+press 1310 A 4
+screenshot 1650
+press 1700 START 4
+screenshot 1800
+press 1850 START 4
+screenshot 2000
+press 2010 A 4
+screenshot 2200
+screenshot 2500
+screenshot 2800
+press 2810 RIGHT 300
+screenshot 2950
+screenshot 3100
+press 3120 A 10
+press 3200 LEFT 400
+screenshot 3300
+screenshot 3500
+screenshot 3700
+exit 3710

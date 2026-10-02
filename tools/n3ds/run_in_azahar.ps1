@@ -41,10 +41,10 @@ if (-not $NoBuild) {
 $built = "\\wsl.localhost\$Distro" + ($BuildInWsl -replace "/", "\") + "\butterscotch.3dsx"
 if (-not (Test-Path $built)) { throw "no build output at $built" }
 
-# Stage: mirror the game folder; keep what the game writes (saves, ini) except logs/shots/done.
+# Stage: copy the game folder over (no deletes: saves and config the game wrote stay).
 New-Item -ItemType Directory -Force $gameDir | Out-Null
 $stageWin = "\\wsl.localhost\$Distro" + ($SdInWsl -replace "/", "\")
-& robocopy $stageWin $gameDir /MIR /XD shots audio /XF butterscotch.log done.txt harness.txt *.ini *.sav atlas_trace.log /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
+& robocopy $stageWin $gameDir /E /XD shots audio /XF butterscotch.log done.txt harness.txt atlas_trace.log /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed ($LASTEXITCODE)" }
 Copy-Item -Force $built (Join-Path $gameDir "butterscotch.3dsx")
 Remove-Item -Force -Recurse -ErrorAction SilentlyContinue (Join-Path $gameDir "done.txt"), (Join-Path $gameDir "shots"), (Join-Path $gameDir "butterscotch.log"), (Join-Path $gameDir "harness.txt")

@@ -13,7 +13,8 @@
   powershell -ExecutionPolicy Bypass -File tools\n3ds\run_in_azahar.ps1 -Harness tools\n3ds\harness\explore.txt -Save <dir>
 #>
 param(
-    # Hard limit: the emulator is killed after this many seconds even if the harness has not finished.
+    # Hard limit: the emulator is killed after this many seconds even if the harness has not finished (0 = none:
+    # the run ends when the harness exits or Azahar is closed).
     [int]$WaitSeconds = 150,
     # Folder with save files (sav1, config.ini, ...) copied into the game folder before launch, e.g. a known checkpoint.
     [string]$Save = "",
@@ -103,14 +104,14 @@ if (-not $Use3dsx) {
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $start = Get-Date
 $proc = Start-Process -FilePath $exe -ArgumentList "`"$deployed`"" -PassThru
-Write-Host "Launched (pid $($proc.Id)); waiting up to $WaitSeconds s"
+if ($WaitSeconds -gt 0) { Write-Host "Launched (pid $($proc.Id)); waiting up to $WaitSeconds s" } else { Write-Host "Launched (pid $($proc.Id)); no time limit" }
 
 $dest = Join-Path $ArtifactsDir "$stamp-$Label"
 New-Item -ItemType Directory -Force $dest | Out-Null
 
 $doneFile = Join-Path $gameDir "done.txt"
 $result = "timeout"
-while (((Get-Date) - $start).TotalSeconds -lt $WaitSeconds) {
+while ($WaitSeconds -le 0 -or ((Get-Date) - $start).TotalSeconds -lt $WaitSeconds) {
     Start-Sleep -Seconds 1
     if ($proc.HasExited) { $result = "emulator-exited"; break }
     if (Test-Path $doneFile) { $result = "done"; Start-Sleep -Seconds 1; break }

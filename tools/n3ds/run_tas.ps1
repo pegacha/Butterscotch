@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   Converts the movie with tools/n3ds/ltm_to_inputs.py (in WSL), writes a harness that takes a screenshot every
-  -ShotEvery frames and quits shortly after the movie ends, then runs tools/n3ds/run_in_azahar.ps1 with no saves
+  -ShotEvery frames and quits shortly after the movie ends (no time limit unless -WaitSeconds is given), then runs tools/n3ds/run_in_azahar.ps1 with no saves
   (a TAS starts from a fresh game) and the fixed seed that input playback uses.
 
 .EXAMPLE
@@ -17,8 +17,8 @@ param(
     [int]$ShotEvery = 300,
     # Keep running this many frames after the last input (the game keeps going on its own).
     [int]$TailFrames = 60,
-    # Hard limit for the emulator run.
-    [int]$WaitSeconds = 240,
+    # Time limit for the emulator run in seconds; 0 (default) = none, the run ends when the movie is over.
+    [int]$WaitSeconds = 0,
     # Rebuild the CIA first (default: use the last build).
     [switch]$Build,
     [string]$Distro = "kfx-ubuntu",

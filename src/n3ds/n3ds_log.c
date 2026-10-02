@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
-// platformLog for the 3DS: N3DS_SD_DIR "butterscotch.log", each line stamped with seconds since start.
+// platformLog for the 3DS: N3DS_SD_DIR "log.txt", each line stamped with seconds since start.
 // Also sent to svcOutputDebugString (shown by Azahar / GDB).
 
 static FILE* gLogFile = NULL;
@@ -14,7 +14,7 @@ static bool gAtLineStart = true;
 
 void N3DSLog_init(void) {
     gLogStartMs = osGetTime();
-    gLogFile = fopen(N3DS_SD_DIR "butterscotch.log", "w");
+    gLogFile = fopen(N3DS_SD_DIR "log.txt", "w");
 }
 
 void N3DSLog_close(void) {

@@ -1,15 +1,16 @@
 <#
 .SYNOPSIS
-  Build -> stage on Azahar's emulated SD -> launch -> wait -> collect -> close.
+  Build -> stage on Azahar's emulated SD -> install -> launch -> wait -> collect -> close.
 
 .DESCRIPTION
   Windows host script (Azahar needs the host GPU); the build runs in WSL. The game folder staged in WSL
-  (-SdInWsl: data.win + gfx/ from n3ds-preprocess) is mirrored to <azahar>\user\sdmc\3ds\butterscotch,
-  the optional -Harness file becomes harness.txt (scripted presses, screenshots, exit). The run's
-  butterscotch.log, shots and Azahar's log are copied to -ArtifactsDir\<timestamp>\.
+  (-SdInWsl, made by tools/n3ds/make_sd.sh) is copied to <azahar>\user\sdmc\3ds\<game>; the game's .cia is
+  installed (azahar -i) and the installed title booted, as on a console (-Use3dsx boots the .3dsx instead).
+  The optional -Harness file becomes harness.txt (scripted presses, screenshots, exit). The run's log.txt,
+  shots and Azahar's log are copied to -ArtifactsDir\<timestamp>\.
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File tools\n3ds\run_in_azahar.ps1 -Harness tools\n3ds\harness\title.txt -WaitSeconds 120
+  powershell -ExecutionPolicy Bypass -File tools\n3ds\run_in_azahar.ps1 -Harness tools\n3ds\harness\explore.txt -Save <dir>
 #>
 param(
     # Hard limit: the emulator is killed after this many seconds even if the harness has not finished.
@@ -27,11 +28,15 @@ param(
     [string]$Distro = "kfx-ubuntu",
     [string]$RepoInWsl = "/root/am2r3ds/butterscotch",
     [string]$BuildInWsl = "/root/am2r3ds/build-n3ds",
-    [string]$SdInWsl = "/root/am2r3ds/sd/3ds/butterscotch",
+    [string]$SdInWsl = "",
     # Azahar does not emulate the New 3DS 804 MHz mode; 300% approximates it.
     [int]$CpuClock = 300,
     [string]$LogFilter = "*:Info",
-    [string]$Label = "run"
+    [string]$Label = "run",
+    # Output/SD folder name of the game build (tools/n3ds/build.sh profile) and its CIA title ID.
+    [string]$Game = "am2r",
+    [string]$TitleId = "000400000a2e2100",
+    [switch]$Use3dsx
 )
 $ErrorActionPreference = "Stop"
 
@@ -39,22 +44,25 @@ $exe = Join-Path $AzaharDir "azahar.exe"
 if (-not (Test-Path $exe)) { throw "azahar.exe not found in $AzaharDir" }
 $user = Join-Path $AzaharDir "user"
 $sdmc = Join-Path $user "sdmc"
-$gameDir = Join-Path $sdmc "3ds\butterscotch"
+$gameDir = Join-Path $sdmc "3ds\$Game"
+if ($SdInWsl -eq "") { $SdInWsl = "/root/am2r3ds/sd/3ds/$Game" }
 
 if (-not $NoBuild) {
     & wsl.exe -d $Distro -u root -- bash "$RepoInWsl/tools/n3ds/build.sh" $BuildInWsl
     if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
 }
-$built = "\\wsl.localhost\$Distro" + ($BuildInWsl -replace "/", "\") + "\butterscotch.3dsx"
+$buildWin = "\\wsl.localhost\$Distro" + ($BuildInWsl -replace "/", "\")
+$built = Join-Path $buildWin "$Game.3dsx"
+$builtCia = Join-Path $buildWin "$Game.cia"
 if (-not (Test-Path $built)) { throw "no build output at $built" }
 
 # Stage: copy the game folder over (no deletes: saves and config the game wrote stay).
 New-Item -ItemType Directory -Force $gameDir | Out-Null
 $stageWin = "\\wsl.localhost\$Distro" + ($SdInWsl -replace "/", "\")
-& robocopy $stageWin $gameDir /E /XD shots audio /XF butterscotch.log done.txt harness.txt inputs.json atlas_trace.log /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
+& robocopy $stageWin $gameDir /E /XD shots audio /XF log.txt done.txt harness.txt inputs.json atlas_trace.log /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed ($LASTEXITCODE)" }
-Copy-Item -Force $built (Join-Path $gameDir "butterscotch.3dsx")
-Remove-Item -Force -Recurse -ErrorAction SilentlyContinue (Join-Path $gameDir "done.txt"), (Join-Path $gameDir "shots"), (Join-Path $gameDir "butterscotch.log"), (Join-Path $gameDir "harness.txt")
+if ($Use3dsx) { Copy-Item -Force $built (Join-Path $gameDir "$Game.3dsx") }
+Remove-Item -Force -Recurse -ErrorAction SilentlyContinue (Join-Path $gameDir "done.txt"), (Join-Path $gameDir "shots"), (Join-Path $gameDir "log.txt"), (Join-Path $gameDir "harness.txt")
 if ($Harness -ne "") { Copy-Item -Force $Harness (Join-Path $gameDir "harness.txt") }
 Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $gameDir "inputs.json")
 if ($Inputs -ne "") { Copy-Item -Force $Inputs (Join-Path $gameDir "inputs.json") }
@@ -78,9 +86,23 @@ if (Test-Path $cfg) {
 
 Get-Process azahar -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 500
+$deployed = Join-Path $gameDir "$Game.3dsx"
+if (-not $Use3dsx) {
+    # Install the CIA (azahar -i stays open afterwards), then boot the installed title.
+    if (-not (Test-Path $builtCia)) { throw "no CIA at $builtCia" }
+    $inst = Start-Process -FilePath $exe -ArgumentList "-i", "`"$builtCia`"" -PassThru
+    Start-Sleep -Seconds 8
+    if (-not $inst.HasExited) { $inst | Stop-Process -Force }
+    Start-Sleep -Milliseconds 500
+    $hi = $TitleId.Substring(0, 8); $lo = $TitleId.Substring(8)
+    $app = Get-ChildItem -Recurse (Join-Path $sdmc "Nintendo 3DS") -Filter "*.app" -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -like "*\title\$hi\$lo\content\*" } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $app) { throw "CIA install did not produce title $TitleId" }
+    $deployed = $app.FullName
+}
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $start = Get-Date
-$proc = Start-Process -FilePath $exe -ArgumentList "`"$(Join-Path $gameDir 'butterscotch.3dsx')`"" -PassThru
+$proc = Start-Process -FilePath $exe -ArgumentList "`"$deployed`"" -PassThru
 Write-Host "Launched (pid $($proc.Id)); waiting up to $WaitSeconds s"
 
 $dest = Join-Path $ArtifactsDir "$stamp-$Label"
@@ -97,7 +119,7 @@ $elapsed = [int]((Get-Date) - $start).TotalSeconds
 if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
 Start-Sleep -Milliseconds 500
 
-foreach ($f in @("butterscotch.log", "done.txt", "harness.txt")) {
+foreach ($f in @("log.txt", "done.txt", "harness.txt")) {
     Copy-Item -Force (Join-Path $gameDir $f) $dest -ErrorAction SilentlyContinue
 }
 Copy-Item -Force (Join-Path $gameDir "shots\*.png") $dest -ErrorAction SilentlyContinue

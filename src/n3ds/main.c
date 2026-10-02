@@ -454,6 +454,26 @@ int main(int argc, char** argv) {
         consoleInit(GFX_TOP, &loadingScreen.console);
     }
 
+    // The game's files on the card are installed once (tools/n3ds/make_sd.sh); a build that needs newer ones says so.
+    {
+        int cardRev = -1;
+        FILE* revFile = fopen(N3DS_SD_DIR "sd_data_rev.txt", "r");
+        if (revFile != NULL) {
+            if (fscanf(revFile, "%d", &cardRev) != 1) cardRev = -1;
+            fclose(revFile);
+        }
+        if (cardRev != N3DS_SD_DATA_REV || !fileExists(dataWinPath)) {
+            char message[128];
+            if (!fileExists(dataWinPath)) snprintf(message, sizeof(message), "No game files in %s. Press START.", N3DS_SD_DIR);
+            else snprintf(message, sizeof(message), "Game files on the SD card are rev %d, this build needs rev %d. Press START.", cardRev, N3DS_SD_DATA_REV);
+            logError("%s\n", message);
+            N3DS_waitForStartExitScreen(&loadingScreen, message);
+            N3DSLoadingScreen_free(&loadingScreen);
+            N3DSLog_close();
+            return 1;
+        }
+    }
+
     N3DSLoadingScreen_set(&loadingScreen, "Scanning data.win", 0, 1);
 
     DataWinParserOptions options = {0};

@@ -4952,11 +4952,13 @@ static void N3DSRenderer_updateMapping(N3DSRenderer* renderer) {
     if (fabsf(m[1]) > 1e-6f || fabsf(m[4]) > 1e-6f) {
         N3DS_UNIMPL("viewRotation", "m1=%.3f m4=%.3f", m[1], m[4]);
     }
+#ifdef N3DS_DIAG_PATTERN
     if (renderer->diagMappingLogs < 12u) {
         renderer->diagMappingLogs++;
         logInfo("N3DS diag: map target=%d vp=%.0f,%.0f %.0fx%.0f x'=%.3fx+%.1f y'=%.3fy+%.1f m0=%.5f m5=%.5f m12=%.3f m13=%.3f\n",
             (int) renderer->currentTargetSurface, renderer->vpX, renderer->vpY, renderer->vpW, renderer->vpH, ax, bx, ay, by, m[0], m[5], m[12], m[13]);
     }
+#endif
     renderer->viewX = 0;
     renderer->viewY = 0;
     renderer->portOffsetX = bx;

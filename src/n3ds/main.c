@@ -12,6 +12,7 @@
 
 #include "../input_recording.h"
 #include "../overlay_file_system.h"
+#include "n3ds_cached_file_system.h"
 #include "n3ds_input.h"
 #include "n3ds_platform_config.h"
 #include "n3ds_renderer.h"
@@ -488,45 +489,6 @@ static void N3DS_waitForStartExitScreen(N3DSLoadingScreen* screen, const char* s
     }
 }
 
-static s64 N3DS_ticksToNs(u64 ticks) {
-    return (s64) ((ticks * 1000000000ULL) / SYSCLOCK_ARM11);
-}
-
-static void N3DS_sleepUntilTick(u64 targetTick) {
-    const u64 coarseGuardTicks = SYSCLOCK_ARM11 / 2000u; // ~0.5 ms
-
-    while (true) {
-        u64 now = svcGetSystemTick();
-        if (now >= targetTick) return;
-
-        u64 remaining = targetTick - now;
-        if (remaining <= coarseGuardTicks) break;
-
-        svcSleepThread(N3DS_ticksToNs(remaining - coarseGuardTicks));
-    }
-
-    while (svcGetSystemTick() < targetTick) {
-    }
-}
-
-static void N3DS_beginPacedFrame(u64* nextFrameTick, u64 frameTicks) {
-    if (nextFrameTick == NULL || frameTicks == 0) return;
-
-    u64 now = svcGetSystemTick();
-    if (*nextFrameTick == 0) {
-        *nextFrameTick = now;
-    } else if (now > *nextFrameTick + frameTicks * 4u) {
-        *nextFrameTick = now;
-    } else {
-        while (now > *nextFrameTick) {
-            *nextFrameTick += frameTicks;
-        }
-    }
-
-    N3DS_sleepUntilTick(*nextFrameTick);
-    *nextFrameTick += frameTicks;
-}
-
 static void N3DSDataWinProgressCallback(const char* chunkName, int chunkIndex, int totalChunks, MAYBE_UNUSED DataWin* dataWin, void* userData) {
     N3DSLoadingScreen* screen = (N3DSLoadingScreen*) userData;
     if (screen == NULL) return;
@@ -641,7 +603,7 @@ int main(int argc, char** argv) {
     // Game files next to data.win (romfs or the SD folder), saves in the SD folder: upstream's overlay file system.
     char* dataWinDir = safeStrdup(dataWinPath);
     bsGetDirname(dataWinDir);
-    FileSystem* fileSystem = (FileSystem*) OverlayFileSystem_create(dataWinDir, N3DS_SD_DIR);
+    FileSystem* fileSystem = N3DSCachedFileSystem_create((FileSystem*) OverlayFileSystem_create(dataWinDir, N3DS_SD_DIR));
     logInfo("Files: %s (saves %s)\n", dataWinDir, N3DS_SD_DIR);
     free(dataWinDir);
     free(dataWinPath);
@@ -682,6 +644,9 @@ int main(int argc, char** argv) {
     arrput(gameArgs, safeStrdup(argc > 0 && argv[0] != NULL ? argv[0] : "butterscotch"));
     Runner_setGameArgs(runner, gameArgs, (int32_t) arrlen(gameArgs));
     N3DSInput_init(runner);
+#ifdef ENABLE_VM_GML_PROFILER
+    Profiler_setEnabled(&vm->profiler, true);
+#endif
     // Keyboard playback in the desktop --playback-inputs format (e.g. a converted TAS), for regression runs.
     InputRecording* inputPlayback = NULL;
     int32_t inputFrame = 0;
@@ -697,16 +662,21 @@ int main(int argc, char** argv) {
     bool debugMonitorVisible = true;
     const Room* lastRoom = NULL;
     uint64_t lastFrameStartTime = nowNanos();
-    u64 nextFrameTick = 0;
     u64 statsStartMs = osGetTime();
     uint32_t statsFrames = 0;
-    double statsStepMs = 0.0, statsDrawMs = 0.0;
+    double statsStepMs = 0.0, statsDrawMs = 0.0, statsWaitMs = 0.0;
+    double pacedSpeed = 0.0;
     uint32_t lastUnimplCount = 0;
 
     while (aptMainLoop() && !runner->shouldExit) {
+        // citro3d paces frames on VBlank at the room speed; a second sleep-based pacer here halved the rate whenever
+        // the two drifted out of phase.
         double gameSpeed = Runner_getEffectiveGameSpeed(runner);
-        if (gameSpeed <= 0.0) gameSpeed = 60.0;
-        N3DS_beginPacedFrame(&nextFrameTick, (u64) ((double) SYSCLOCK_ARM11 / gameSpeed));
+        if (gameSpeed <= 0.0 || gameSpeed > 60.0) gameSpeed = 60.0;
+        if (gameSpeed != pacedSpeed) {
+            C3D_FrameRate((float) gameSpeed);
+            pacedSpeed = gameSpeed;
+        }
 
         uint64_t frameStartNow = nowNanos();
         runner->deltaTime = (int64_t) (frameStartNow - lastFrameStartTime) / 1000.0;
@@ -720,10 +690,22 @@ int main(int argc, char** argv) {
         if ((down & KEY_START) && (hidKeysHeld() & KEY_SELECT)) break;
         if ((down & KEY_SELECT) && (hidKeysHeld() & KEY_L)) debugMonitorVisible = !debugMonitorVisible;
 
+        u64 waitStartTick = svcGetSystemTick();
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+        double waitMs = (double) (svcGetSystemTick() - waitStartTick) * 1000.0 / (double) SYSCLOCK_ARM11;
         N3DSScreenshot_captureIfRequested(renderer);
         u64 stepStartTick = svcGetSystemTick();
         Runner_step(runner);
+#ifdef ENABLE_VM_GML_PROFILER
+        if (runner->frameCount > 0 && runner->frameCount % 300 == 0) {
+            char* report = Profiler_createReport(vm->profiler, 15, 300);
+            if (report != NULL) {
+                logInfo("%s\n", report);
+                free(report);
+            }
+            Profiler_reset(vm->profiler);
+        }
+#endif
         float dt = (float) (runner->deltaTime / 1000000.0);
         if (0.0f > dt) dt = 0.0f;
         if (dt > 0.1f) dt = 0.1f;
@@ -760,7 +742,9 @@ int main(int argc, char** argv) {
         Runner_drawPost(runner, N3DS_TOP_SCREEN_W, N3DS_TOP_SCREEN_H);
         renderer->vtable->endFrameEnd(renderer);
         Runner_drawGUI(runner, N3DS_TOP_SCREEN_W, N3DS_TOP_SCREEN_H, gameW, gameH);
+#ifdef N3DS_DIAG_PATTERN
         if (runner->frameCount % 300 == 5) N3DSRenderer_logDiag(renderer);
+#endif
         if (debugMonitorVisible) N3DSDebugMonitor_draw(&debugMonitor, runner, renderer);
         renderer->vtable->flush(renderer);
         Runner_handlePendingRoomChange(runner);
@@ -782,17 +766,19 @@ int main(int argc, char** argv) {
         statsFrames++;
         statsStepMs += stepMs;
         statsDrawMs += drawMs;
+        statsWaitMs += waitMs;
         u64 nowMs = osGetTime();
         if (nowMs - statsStartMs >= 5000u) {
             double seconds = (double) (nowMs - statsStartMs) / 1000.0;
-            logInfo("Perf: %.1f fps, step %.2f ms, draw %.2f ms (avg over %u frames), room %s, app free %lu KB, linear free %lu KB\n",
-                (double) statsFrames / seconds, statsStepMs / statsFrames, statsDrawMs / statsFrames, (unsigned) statsFrames,
+            logInfo("Perf: %.1f fps, step %.2f ms, draw %.2f ms, gpu/vblank wait %.2f ms (avg over %u frames), room %s, app free %lu KB, linear free %lu KB\n",
+                (double) statsFrames / seconds, statsStepMs / statsFrames, statsDrawMs / statsFrames, statsWaitMs / statsFrames, (unsigned) statsFrames,
                 runner->currentRoom != NULL ? runner->currentRoom->name : "-",
                 (unsigned long) (osGetMemRegionFree(MEMREGION_APPLICATION) / 1024u), (unsigned long) (linearSpaceFree() / 1024u));
             statsStartMs = nowMs;
             statsFrames = 0;
             statsStepMs = 0.0;
             statsDrawMs = 0.0;
+            statsWaitMs = 0.0;
             if (N3DS_unimplCount() != lastUnimplCount) {
                 lastUnimplCount = N3DS_unimplCount();
                 N3DS_unimplDump("periodic");
@@ -806,7 +792,7 @@ int main(int argc, char** argv) {
     audioSystem->vtable->destroy(audioSystem);
     renderer->vtable->destroy(renderer);
     Runner_free(runner);
-    OverlayFileSystem_destroy((OverlayFileSystem*) fileSystem);
+    OverlayFileSystem_destroy((OverlayFileSystem*) N3DSCachedFileSystem_destroy(fileSystem));
     VM_free(vm);
     DataWin_free(dataWin);
     N3DSLog_close();

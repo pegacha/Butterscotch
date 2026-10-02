@@ -91,6 +91,7 @@ typedef enum {
     N3DS_TEXFMT_HYBRID = 3,
     N3DS_TEXFMT_L4 = 4,
     N3DS_TEXFMT_LA4 = 5,
+    N3DS_TEXFMT_RGBA8 = 6, // items with partial alpha (RGBA5551 only has 1 bit)
 } N3DSTextureFormat;
 
 typedef struct {
@@ -316,6 +317,7 @@ typedef struct {
     float presentX;
     float presentY;
     float presentScale;
+    bool stretchToScreen;
     C3D_RenderTarget* topTarget;
     C3D_RenderTarget* bottomTarget;
     N3DSLoadedAtlasPage* atlasPages;
@@ -728,6 +730,7 @@ static uint32_t N3DSRenderer_getTextureFormatBytesPerPixel(uint32_t textureForma
         case N3DS_TEXFMT_HYBRID: return 1u;
         case N3DS_TEXFMT_LA4: return 1u;
         case N3DS_TEXFMT_L4: return 0u;
+        case N3DS_TEXFMT_RGBA8: return 4u;
         case N3DS_TEXFMT_RGBA5551:
         default: return 2u;
     }
@@ -740,6 +743,7 @@ static GPU_TEXCOLOR N3DSRenderer_getGPUTextureFormat(uint32_t textureFormat) {
         case N3DS_TEXFMT_HYBRID: return GPU_ETC1A4;
         case N3DS_TEXFMT_L4: return GPU_L4;
         case N3DS_TEXFMT_LA4: return GPU_LA4;
+        case N3DS_TEXFMT_RGBA8: return GPU_RGBA8;
         case N3DS_TEXFMT_RGBA5551:
         default: return GPU_RGBA5551;
     }
@@ -752,6 +756,7 @@ static const char* N3DSRenderer_getTextureFormatName(uint32_t textureFormat) {
         case N3DS_TEXFMT_HYBRID: return "hybrid";
         case N3DS_TEXFMT_L4: return "l4";
         case N3DS_TEXFMT_LA4: return "la4";
+        case N3DS_TEXFMT_RGBA8: return "rgba8";
         case N3DS_TEXFMT_RGBA5551:
         default: return "rgba5551";
     }
@@ -767,6 +772,8 @@ static uint32_t N3DSRenderer_getPageVRAMBytes(MAYBE_UNUSED const N3DSRenderer* r
         case N3DS_TEXFMT_ETC1A4:
         case N3DS_TEXFMT_HYBRID:
             return texelCount;
+        case N3DS_TEXFMT_RGBA8:
+            return texelCount * 4u;
         case N3DS_TEXFMT_INDEXED8:
         case N3DS_TEXFMT_RGBA5551:
         default:
@@ -5034,6 +5041,29 @@ static void N3DSRenderer_computeLetterbox(int32_t gameW, int32_t gameH, int32_t 
     *outH = effH;
 }
 
+// Where a w x h image goes on the top screen: integer-scaled and centred, or the whole screen when stretching.
+static void N3DSRenderer_screenRect(const N3DSRenderer* renderer, int32_t w, int32_t h, float* outX, float* outY, float* outW, float* outH) {
+    if (renderer->stretchToScreen || w <= 0 || h <= 0) {
+        *outX = 0.0f;
+        *outY = 0.0f;
+        *outW = (float) N3DS_TOP_WIDTH;
+        *outH = (float) N3DS_TOP_HEIGHT;
+        return;
+    }
+    int32_t lx, ly, lw, lh;
+    N3DSRenderer_computeLetterbox(w, h, N3DS_TOP_WIDTH, N3DS_TOP_HEIGHT, &lx, &ly, &lw, &lh);
+    float scale = (float) lw / (float) w;
+    if (scale >= 1.0f) scale = floorf(scale);
+    *outW = (float) w * scale;
+    *outH = (float) h * scale;
+    *outX = floorf(((float) N3DS_TOP_WIDTH - *outW) * 0.5f);
+    *outY = floorf(((float) N3DS_TOP_HEIGHT - *outH) * 0.5f);
+}
+
+void N3DSRenderer_setStretchToScreen(Renderer* base, bool stretch) {
+    ((N3DSRenderer*) base)->stretchToScreen = stretch;
+}
+
 static void N3DSRenderer_beginFrame(Renderer* base, int32_t gameW, int32_t gameH, int32_t windowW, int32_t windowH) {
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     renderer->frameSequence++;
@@ -5088,17 +5118,14 @@ static void N3DSRenderer_endFrameEnd(Renderer* base) {
     app->image.subtex = &app->subtex;
 
     N3DSRenderer_bindTarget(renderer, RENDER_TARGET_HOST_FRAMEBUFFER, true);
-    int32_t lx, ly, lw, lh;
-    N3DSRenderer_computeLetterbox(app->width, app->height, N3DS_TOP_WIDTH, N3DS_TOP_HEIGHT, &lx, &ly, &lw, &lh);
-    float scale = (float) lw / (float) app->width;
-    if (scale >= 1.0f) scale = floorf(scale);
-    float dw = (float) app->width * scale;
-    float dh = (float) app->height * scale;
-    float dx = floorf(((float) N3DS_TOP_WIDTH - dw) * 0.5f);
-    float dy = floorf(((float) N3DS_TOP_HEIGHT - dh) * 0.5f);
+    float dx, dy, dw, dh;
+    N3DSRenderer_screenRect(renderer, app->width, app->height, &dx, &dy, &dw, &dh);
+    float scale = dw / (float) app->width;
+    float scaleY = dh / (float) app->height;
+    bool integer = scale == floorf(scale) && scaleY == floorf(scaleY);
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
-    C3D_TexSetFilter(&app->texture, scale == floorf(scale) ? GPU_NEAREST : GPU_LINEAR, scale == floorf(scale) ? GPU_NEAREST : GPU_LINEAR);
-    C2D_DrawImageAt(app->image, dx, dy, 0.5f, NULL, scale, scale);
+    C3D_TexSetFilter(&app->texture, integer ? GPU_NEAREST : GPU_LINEAR, integer ? GPU_NEAREST : GPU_LINEAR);
+    C2D_DrawImageAt(app->image, dx, dy, 0.5f, NULL, scale, scaleY);
 #ifdef N3DS_DIAG_PATTERN
     C2D_DrawRectSolid(0.0f, 0.0f, 0.5f, 20.0f, 20.0f, C2D_Color32(255, 0, 0, 255));
 #endif
@@ -5140,13 +5167,9 @@ static void N3DSRenderer_beginGUI(Renderer* base, int32_t guiW, int32_t guiH, in
     if (targetSurfaceId == RENDER_TARGET_HOST_FRAMEBUFFER) {
         // GUI on the screen covers the presented application surface.
         N3DSRenderer_bindTarget(renderer, RENDER_TARGET_HOST_FRAMEBUFFER, false);
-        int32_t lx, ly, lw, lh;
-        N3DSRenderer_computeLetterbox(guiW, guiH, N3DS_TOP_WIDTH, N3DS_TOP_HEIGHT, &lx, &ly, &lw, &lh);
-        float scale = (float) lw / (float) guiW;
-        if (scale >= 1.0f) scale = floorf(scale);
-        float dw = (float) guiW * scale;
-        float dh = (float) guiH * scale;
-        N3DSRenderer_setViewport(renderer, floorf(((float) N3DS_TOP_WIDTH - dw) * 0.5f), floorf(((float) N3DS_TOP_HEIGHT - dh) * 0.5f), dw, dh);
+        float dx, dy, dw, dh;
+        N3DSRenderer_screenRect(renderer, guiW, guiH, &dx, &dy, &dw, &dh);
+        N3DSRenderer_setViewport(renderer, dx, dy, dw, dh);
     } else {
         N3DSRenderer_bindTarget(renderer, targetSurfaceId, false);
         N3DSRenderer_setViewport(renderer, (float) portX, (float) portY, (float) portW, (float) portH);

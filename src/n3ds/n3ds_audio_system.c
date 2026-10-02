@@ -203,6 +203,7 @@ struct N3DSAudioSystem {
     FileSystem* fileSystem;
     bool initialized;
     float masterGain;
+    uint32_t effectsStarted;
     float groupGains[32];
     N3DSStreamEntry streams[N3DS_MAX_STREAMS];
     N3DSSoundInstance instances[N3DS_MAX_SOUND_INSTANCES];
@@ -2889,7 +2890,11 @@ static void N3DSAudio_init(AudioSystem* base, DataWin* dataWin, FileSystem* file
 
     audio->workerEnabled = false;
 #if N3DS_ENABLE_STREAM_WORKER
-    if (R_SUCCEEDED(APT_SetAppCpuTimeLimit(N3DS_STREAM_WORKER_CPU_LIMIT))) {
+    // New 3DS titles get core 2 to themselves (RSF CanAccessCore2); core 1 is the system core, time-sliced.
+    if (audio->isNew3DS) {
+        audio->workerThread = threadCreate(N3DSAudio_streamWorkerMain, audio, N3DS_STREAM_WORKER_STACK_SIZE, N3DS_STREAM_WORKER_PRIORITY, 2, false);
+    }
+    if (audio->workerThread == NULL && R_SUCCEEDED(APT_SetAppCpuTimeLimit(N3DS_STREAM_WORKER_CPU_LIMIT))) {
         audio->workerThread = threadCreate(
             N3DSAudio_streamWorkerMain,
             audio,
@@ -2898,8 +2903,9 @@ static void N3DSAudio_init(AudioSystem* base, DataWin* dataWin, FileSystem* file
             N3DS_STREAM_WORKER_CORE_ID,
             false
         );
-        audio->workerEnabled = audio->workerThread != NULL;
     }
+    audio->workerEnabled = audio->workerThread != NULL;
+    logInfo("N3DS audio: music streaming worker %s\n", audio->workerThread == NULL ? "unavailable (decoding on the main thread)" : (audio->isNew3DS ? "on core 2 (or 1)" : "on core 1"));
 #endif
     N3DSDebugLog_event(
         "audio",
@@ -3128,7 +3134,7 @@ static int32_t N3DSAudio_playSound(AudioSystem* base, int32_t soundIndex, MAYBE_
             musicBcwav = stream->bcwav;
         } else {
             if (!N3DSAudio_parseBcwavFile(path, &musicBcwav)) {
-                fprintf(stderr, "N3DSAudio: failed to parse music header %s\n", path);
+                logWarn("N3DS audio: cannot read music %s\n", path);
                 free(path);
                 N3DSAudio_releaseInstance(audio, inst);
                 LightLock_Unlock(&audio->lock);
@@ -3138,12 +3144,14 @@ static int32_t N3DSAudio_playSound(AudioSystem* base, int32_t soundIndex, MAYBE_
 
         bool started = N3DSAudio_startFileNativeAdpcmStreamPlayback(audio, inst, path, &musicBcwav);
         if (!started) {
-            N3DSDebugLog_event("audio_fail", "stream start failed sound=%ld path=%s", (long) soundIndex, path);
+            logWarn("N3DS audio: music %s did not start\n", path);
             free(path);
             N3DSAudio_releaseInstance(audio, inst);
             LightLock_Unlock(&audio->lock);
             return -1;
         }
+        logInfo("N3DS audio: music %s (%lu Hz, %lu ch, %s)\n", path, (unsigned long) inst->sampleRate, (unsigned long) inst->channelCount,
+            inst->useNativeAdpcm ? "DSP-ADPCM" : "PCM");
         N3DSDebugLog_event(
             "audio_start",
             "stream sound=%ld instance=%ld native=%d loop=%d rate=%lu ch=%lu path=%s",
@@ -3260,6 +3268,7 @@ static int32_t N3DSAudio_playSound(AudioSystem* base, int32_t soundIndex, MAYBE_
             LightLock_Unlock(&audio->lock);
             return -1;
         }
+        audio->effectsStarted++;
         int32_t instanceId = inst->instanceId;
         LightLock_Unlock(&audio->lock);
         return instanceId;
@@ -3283,6 +3292,7 @@ static int32_t N3DSAudio_playSound(AudioSystem* base, int32_t soundIndex, MAYBE_
         return -1;
     }
 
+    audio->effectsStarted++;
     int32_t instanceId = inst->instanceId;
     LightLock_Unlock(&audio->lock);
     return instanceId;
@@ -3897,4 +3907,8 @@ void N3DSAudioSystem_getCacheStats(
     if (outCachedBytes != NULL) *outCachedBytes = audio->cachedSoundBytes;
     if (outCacheLimitBytes != NULL) *outCacheLimitBytes = audio->maxCachedSoundBytes;
     LightLock_Unlock(&audio->lock);
+}
+
+uint32_t N3DSAudio_effectsStarted(AudioSystem* base) {
+    return base != NULL ? ((N3DSAudioSystem*) base)->effectsStarted : 0u;
 }

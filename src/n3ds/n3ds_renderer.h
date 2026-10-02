@@ -47,3 +47,5 @@ C3D_RenderTarget* N3DSRenderer_getTopTarget(Renderer* renderer);
 // Deletes surfaces freed during earlier frames. Call outside C3D_FrameBegin/End; all = everything (shutdown).
 void N3DSRenderer_collectGarbage(Renderer* renderer, bool all);
 void N3DSRenderer_logDiag(Renderer* renderer);
+// Stretch the game to the whole top screen (else integer scale, centred).
+void N3DSRenderer_setStretchToScreen(Renderer* renderer, bool stretch);

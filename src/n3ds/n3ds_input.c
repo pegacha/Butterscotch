@@ -58,7 +58,7 @@ static u32 N3DSInput_keyFromName(const char* name) {
     static const struct { const char* name; u32 key; } names[] = {
         { "A", KEY_A }, { "B", KEY_B }, { "X", KEY_X }, { "Y", KEY_Y }, { "L", KEY_L }, { "R", KEY_R },
         { "ZL", KEY_ZL }, { "ZR", KEY_ZR }, { "START", KEY_START }, { "SELECT", KEY_SELECT },
-        { "UP", KEY_DUP }, { "DOWN", KEY_DDOWN }, { "LEFT", KEY_DLEFT }, { "RIGHT", KEY_DRIGHT },
+        { "UP", KEY_DUP }, { "DOWN", KEY_DDOWN }, { "LEFT", KEY_DLEFT }, { "RIGHT", KEY_DRIGHT }, { "TOUCH", KEY_TOUCH },
     };
     repeat(sizeof(names) / sizeof(names[0]), i) {
         if (strcasecmp(names[i].name, name) == 0) return names[i].key;
@@ -117,9 +117,10 @@ static void N3DSInput_fillGamepad(GamepadSlot* slot, u32 held, const circlePosit
     snprintf(slot->description, sizeof(slot->description), "Nintendo 3DS");
     snprintf(slot->guid, sizeof(slot->guid), "n3ds-0");
 
-    // Nintendo layout like the Switch port: A/B/Y/X = face 1..4.
-    if (held & KEY_A) slot->buttonDown[0] = true;
-    if (held & KEY_B) slot->buttonDown[1] = true;
+    // GameMaker's face buttons are positions (gp_face1 = bottom, 2 = right, 3 = left, 4 = top), so by position:
+    // B, A, Y, X. A game's own bindings then decide what each does (AM2R: res/n3ds/am2r/sd/config.ini).
+    if (held & KEY_B) slot->buttonDown[0] = true;
+    if (held & KEY_A) slot->buttonDown[1] = true;
     if (held & KEY_Y) slot->buttonDown[2] = true;
     if (held & KEY_X) slot->buttonDown[3] = true;
     if (held & KEY_L) slot->buttonDown[4] = true;

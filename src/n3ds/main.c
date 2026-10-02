@@ -23,6 +23,7 @@
 #include <citro2d.h>
 
 #include <ctype.h>
+#include <malloc.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -401,9 +402,31 @@ static void N3DSDataWinProgressCallback(const char* chunkName, int chunkIndex, i
 
 static void N3DS_noopSetWindowTitle(MAYBE_UNUSED const char* title) {}
 static void N3DS_noopSetWindowSize(MAYBE_UNUSED int32_t width, MAYBE_UNUSED int32_t height) {}
+typedef enum {
+    N3DS_SCREEN_WIDE,
+    N3DS_SCREEN_STRETCH,
+    N3DS_SCREEN_PILLARBOX,
+    N3DS_SCREEN_MODE_COUNT
+} N3DSScreenMode;
+
+#ifndef N3DS_DEFAULT_SCREEN_MODE
+#define N3DS_DEFAULT_SCREEN_MODE N3DS_SCREEN_WIDE
+#endif
+static N3DSScreenMode gScreenMode = N3DS_DEFAULT_SCREEN_MODE;
+static int32_t gWindowW = N3DS_TOP_SCREEN_W;
+static int32_t gWindowH = N3DS_TOP_SCREEN_H;
+
+static const char* N3DS_screenModeName(N3DSScreenMode mode) {
+    switch (mode) {
+        case N3DS_SCREEN_WIDE: return "wide (more of the room, 1:1)";
+        case N3DS_SCREEN_STRETCH: return "stretch";
+        default: return "pillarbox (1:1)";
+    }
+}
+
 static bool N3DS_getWindowSize(int32_t* outW, int32_t* outH) {
-    *outW = N3DS_TOP_SCREEN_W;
-    *outH = N3DS_TOP_SCREEN_H;
+    *outW = gWindowW;
+    *outH = gWindowH;
     return true;
 }
 
@@ -662,14 +685,37 @@ int main(int argc, char** argv) {
         int32_t gameW = runner->applicationWidth;
         int32_t gameH = runner->applicationHeight;
 
+        // Screen mode (a tap on the touch screen cycles; the game doesn't use touch). Wide: upstream's widescreen
+        // hack (views grow to the 5:3 top screen, 1:1 pixels). Stretch: the native size scaled to 400x240.
+        // Pillarbox: native size 1:1, centred.
+        if (down & KEY_TOUCH) {
+            gScreenMode = (N3DSScreenMode) ((gScreenMode + 1) % N3DS_SCREEN_MODE_COUNT);
+            logInfo("Screen mode: %s\n", N3DS_screenModeName(gScreenMode));
+        }
+        runner->widescreenExtraWidth = 0;
+        runner->widescreenExtraHeight = 0;
+        if (gScreenMode == N3DS_SCREEN_WIDE && runner->usingAppSurface && gameW > 0 && gameH > 0) {
+            int32_t targetW = (int32_t) ((float) gameH * ((float) N3DS_TOP_SCREEN_W / (float) N3DS_TOP_SCREEN_H) + 0.5f);
+            if (targetW > gameW) {
+                runner->widescreenExtraWidth = targetW - gameW;
+                gameW = targetW;
+            }
+        }
+        // The "window" the game sees: the screen, except in Stretch mode where it is the game's own size (and the
+        // renderer stretches that to the screen).
+        bool stretch = gScreenMode == N3DS_SCREEN_STRETCH;
+        gWindowW = stretch ? (runner->usingAppSurface ? runner->applicationWidth : (int32_t) gen8->defaultWindowWidth) : N3DS_TOP_SCREEN_W;
+        gWindowH = stretch ? (runner->usingAppSurface ? runner->applicationHeight : (int32_t) gen8->defaultWindowHeight) : N3DS_TOP_SCREEN_H;
+        N3DSRenderer_setStretchToScreen(renderer, stretch);
+
         u64 drawStartTick = svcGetSystemTick();
-        Runner_drawPre(runner, N3DS_TOP_SCREEN_W, N3DS_TOP_SCREEN_H);
-        Runner_beginFrame(runner, gameW, gameH, N3DS_TOP_SCREEN_W, N3DS_TOP_SCREEN_H, N3DS_TOP_SCREEN_W, N3DS_TOP_SCREEN_H);
+        Runner_drawPre(runner, gWindowW, gWindowH);
+        Runner_beginFrame(runner, gameW, gameH, gWindowW, gWindowH, gWindowW, gWindowH);
         Runner_drawViews(runner, gameW, gameH, false);
         renderer->vtable->endFrameInit(renderer);
-        Runner_drawPost(runner, N3DS_TOP_SCREEN_W, N3DS_TOP_SCREEN_H);
+        Runner_drawPost(runner, gWindowW, gWindowH);
         renderer->vtable->endFrameEnd(renderer);
-        Runner_drawGUI(runner, N3DS_TOP_SCREEN_W, N3DS_TOP_SCREEN_H, gameW, gameH);
+        Runner_drawGUI(runner, gWindowW, gWindowH, gameW, gameH);
 #ifdef N3DS_DIAG_PATTERN
         if (runner->frameCount % 300 == 5) N3DSRenderer_logDiag(renderer);
 #endif
@@ -698,10 +744,16 @@ int main(int argc, char** argv) {
         u64 nowMs = osGetTime();
         if (nowMs - statsStartMs >= 5000u) {
             double seconds = (double) (nowMs - statsStartMs) / 1000.0;
-            logInfo("Perf: %.1f fps, step %.2f ms, draw %.2f ms, gpu/vblank wait %.2f ms (avg over %u frames), room %s, app free %lu KB, linear free %lu KB\n",
+            // The heap reserves the whole app region up front, so report what malloc actually uses.
+            struct mallinfo mi = mallinfo();
+            uint32_t effects = 0;
+#ifdef N3DS_ENABLE_AUDIO
+            effects = N3DSAudio_effectsStarted(runner->audioSystem);
+#endif
+            logInfo("Perf: %.1f fps, step %.2f ms, draw %.2f ms, gpu/vblank wait %.2f ms (avg over %u frames), room %s, heap used %lu KB, linear free %lu KB, sfx %lu\n",
                 (double) statsFrames / seconds, statsStepMs / statsFrames, statsDrawMs / statsFrames, statsWaitMs / statsFrames, (unsigned) statsFrames,
                 runner->currentRoom != NULL ? runner->currentRoom->name : "-",
-                (unsigned long) (osGetMemRegionFree(MEMREGION_APPLICATION) / 1024u), (unsigned long) (linearSpaceFree() / 1024u));
+                (unsigned long) (mi.uordblks / 1024u), (unsigned long) (linearSpaceFree() / 1024u), (unsigned long) effects);
             statsStartMs = nowMs;
             statsFrames = 0;
             statsStepMs = 0.0;

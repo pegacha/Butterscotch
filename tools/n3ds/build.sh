@@ -22,6 +22,9 @@ case "${BS_N3DS_GAME:-am2r}" in
             -DN3DS_SD_FOLDER=am2r
             -DN3DS_UNIQUE_ID=0xA2E21
             -DN3DS_PRODUCT_CODE=CTR-P-AM2R
+            # AM2R lays out its own 320x240 display (application_surface and HUD surface at its own offsets), so
+            # the widescreen hack can't widen it: stretch it to the screen instead.
+            -DN3DS_SCREEN_MODE=stretch
         )
         ;;
     *)

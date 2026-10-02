@@ -1,0 +1,24 @@
+# Load save slot A, then: screen modes (touch cycles wide -> stretch -> pillarbox -> wide), controls.
+after_room titleroom
+press 800 START 4
+press 900 START 4
+press 1000 A 4
+press 1100 A 4
+after_room rm_a0h01
+screenshot 90
+press 100 TOUCH 2
+screenshot 130
+press 140 TOUCH 2
+screenshot 170
+press 180 TOUCH 2
+press 200 RIGHT 300
+press 230 B 20
+press 330 B 20
+screenshot 300
+press 520 Y 4
+screenshot 524
+press 560 R 40
+press 580 Y 4
+screenshot 584
+screenshot 640
+exit 650

@@ -95,6 +95,7 @@ typedef enum {
     N3DS_TEXFMT_HYBRID = 3,
     N3DS_TEXFMT_L4 = 4,
     N3DS_TEXFMT_LA4 = 5,
+    N3DS_TEXFMT_RGBA8 = 6,
 } N3DSTextureFormat;
 
 typedef struct {
@@ -202,6 +203,7 @@ typedef struct {
 typedef struct {
     bool sawFrame;
     bool allFramesMonoSafe;
+    bool anyPartialAlpha;
 } DirectSpriteFormatState;
 
 typedef struct {
@@ -856,6 +858,7 @@ static const char* getTex3dsFormatName(N3DSTextureFormat format) {
         case N3DS_TEXFMT_HYBRID: return "etc1a4";
         case N3DS_TEXFMT_L4: return "l4";
         case N3DS_TEXFMT_LA4: return "la4";
+        case N3DS_TEXFMT_RGBA8: return "rgba8";
         default: return "etc1a4";
     }
 }
@@ -872,6 +875,7 @@ static const char* getTextureFormatLabel(N3DSTextureFormat format) {
         case N3DS_TEXFMT_HYBRID: return "hybrid";
         case N3DS_TEXFMT_L4: return "l4";
         case N3DS_TEXFMT_LA4: return "la4";
+        case N3DS_TEXFMT_RGBA8: return "rgba8";
         default: return "unknown";
     }
 }
@@ -883,6 +887,7 @@ static bool tryParseTextureFormatLabel(const char* label, N3DSTextureFormat* out
     if (strcmp(label, "indexed8") == 0) { *outFormat = N3DS_TEXFMT_INDEXED8; return true; }
     if (strcmp(label, "l4") == 0) { *outFormat = N3DS_TEXFMT_L4; return true; }
     if (strcmp(label, "la4") == 0) { *outFormat = N3DS_TEXFMT_LA4; return true; }
+    if (strcmp(label, "rgba8") == 0) { *outFormat = N3DS_TEXFMT_RGBA8; return true; }
     if (strcmp(label, "hybrid") == 0) { *outFormat = N3DS_TEXFMT_HYBRID; return true; }
     return false;
 }
@@ -1307,6 +1312,23 @@ static bool* collectTargetedDialogueBattleTPAGs(DataWin* dataWin) {
     return targetTPAGs;
 }
 
+// True when a region has real partial transparency (soft edges, translucent boxes), which RGBA5551's 1-bit alpha
+// would turn into fully opaque or fully clear pixels.
+static bool regionHasPartialAlpha(const uint8_t* rgba, uint32_t stride, uint32_t x0, uint32_t y0, uint32_t w, uint32_t h) {
+    if (rgba == NULL || w == 0 || h == 0) return false;
+    uint32_t partial = 0;
+    uint32_t threshold = (w * h) / 256u;
+    if (threshold < 8u) threshold = 8u;
+    repeat(h, y) {
+        const uint8_t* row = rgba + (((size_t) y0 + y) * stride + x0) * 4u;
+        repeat(w, x) {
+            uint8_t a = row[(size_t) x * 4u + 3u];
+            if (a >= 16u && a <= 239u && ++partial >= threshold) return true;
+        }
+    }
+    return false;
+}
+
 static N3DSTextureFormat chooseTargetedMonoItemFormat(
     const uint8_t* rgba,
     uint32_t stride,
@@ -1488,15 +1510,23 @@ static bool runTex3dsAtlas(const char* tex3dsExe, const char* pngGlobPath, const
     }
     return true;
 #else
+    // The shell has to expand the glob (tex3ds doesn't on POSIX): quote the directory, not the pattern. Frame files
+    // are zero-padded, so the sorted expansion is the frame order.
+    char globDir[1024];
+    snprintf(globDir, sizeof(globDir), "%s", pngGlobPath);
+    char* pattern = strrchr(globDir, '/');
+    if (pattern == NULL) return false;
+    *pattern++ = '\0';
     char command[4096];
     snprintf(
         command,
         sizeof(command),
-        "\"%s\" --atlas -f %s -z none -o \"%s\" \"%s\"",
+        "\"%s\" --atlas -f %s -z none -o \"%s\" \"%s\"/%s",
         tex3dsExe,
         getTex3dsFormatName(format),
         t3xPath,
-        pngGlobPath
+        globDir,
+        pattern
     );
     int rc = system(command);
     if (rc != 0) {
@@ -2319,6 +2349,7 @@ static bool emitDirectSpriteFrameAsset(
     if (spriteFormatStates != NULL) {
         DirectSpriteFormatState* state = &spriteFormatStates[spriteIndex];
         bool frameMonoSafe = pixelsLookMonochrome(framePixels, logicalW, logicalH);
+        if (regionHasPartialAlpha(framePixels, logicalW, 0, 0, logicalW, logicalH)) state->anyPartialAlpha = true;
         if (!state->sawFrame) {
             state->sawFrame = true;
             state->allFramesMonoSafe = frameMonoSafe;
@@ -2370,6 +2401,7 @@ static bool finalizeDirectSpriteAssets(const Options* options, const DataWin* da
             spriteFormatStates[spriteIndex].sawFrame &&
             spriteFormatStates[spriteIndex].allFramesMonoSafe;
         N3DSTextureFormat spriteFormat = spriteMonoSafe ? N3DS_TEXFMT_LA4 : N3DS_TEXFMT_RGBA5551;
+        if (!spriteMonoSafe && spriteFormatStates != NULL && spriteFormatStates[spriteIndex].anyPartialAlpha) spriteFormat = N3DS_TEXFMT_RGBA8;
         if (sprite->name != NULL && sprite->name[0] != '\0') {
             fprintf(
                 stderr,
@@ -2855,7 +2887,8 @@ static bool flushPackedPages(const Options* options, OutputPage* outputPages, Pa
         PackedPage* packedPage = packedPages[i];
         OutputPage* outputPage = &outputPages[packedPage->pageIndex];
         N3DSTextureFormat pageFormat = (N3DSTextureFormat) outputPage->textureFormat;
-        if (options->textureFormat == N3DS_TEXFMT_HYBRID) {
+        // RGBA8 pages hold the items with partial alpha: keep them as they are.
+        if (options->textureFormat == N3DS_TEXFMT_HYBRID && pageFormat != N3DS_TEXFMT_RGBA8) {
             pageFormat = chooseHybridPageFormat(packedPage);
             outputPage->textureFormat = (uint32_t) pageFormat;
             snprintf(outputPage->path, sizeof(outputPage->path), "page_%03u.%s", packedPage->pageIndex, getPageExtension(pageFormat));
@@ -2872,7 +2905,7 @@ static bool flushPackedPages(const Options* options, OutputPage* outputPages, Pa
                 }
             }
         }
-        if (!hasManualOverride && pageShouldForceRGBA5551(outputPage)) {
+        if (!hasManualOverride && pageFormat != N3DS_TEXFMT_RGBA8 && pageShouldForceRGBA5551(outputPage)) {
             pageFormat = N3DS_TEXFMT_RGBA5551;
             outputPage->textureFormat = (uint32_t) pageFormat;
             snprintf(outputPage->path, sizeof(outputPage->path), "page_%03u.%s", packedPage->pageIndex, getPageExtension(pageFormat));
@@ -3050,6 +3083,10 @@ static bool convertTextures(const Options* options, DataWin* dataWin) {
                 if (itemMonoSafe) {
                     itemPageFormat = itemMonoFormat;
                 }
+            }
+            if (itemPageFormat != N3DS_TEXFMT_LA4 &&
+                regionHasPartialAlpha(rgba, (uint32_t) width, item->sourceX, item->sourceY, item->sourceWidth, item->sourceHeight)) {
+                itemPageFormat = N3DS_TEXFMT_RGBA8;
             }
 
             uint32_t itemWidth = item->sourceWidth;

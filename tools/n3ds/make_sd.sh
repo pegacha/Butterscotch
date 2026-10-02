@@ -19,4 +19,7 @@ mkdir -p "$out"
 rsync -a --exclude '*.exe' --exclude '*.dll' --exclude '*.ogg' --exclude '*.wav' --exclude '*.mp3' --exclude 'gfx/' --exclude 'audio/' "$game"/ "$out"/
 "$pre/n3ds-preprocess" "$game/data.win" "$out"
 cp "$src/tools/n3ds/sd_data_rev.txt" "$out/sd_data_rev.txt"
+# Default files for this game (e.g. AM2R's 3DS control config), only where the card has none.
+seed="$src/res/n3ds/$(basename "$out")/sd"
+if [ -d "$seed" ]; then cp -r --update=none "$seed"/. "$out"/; fi
 du -sh "$out"

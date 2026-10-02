@@ -1,0 +1,2 @@
+screenshot 1400
+exit 1500

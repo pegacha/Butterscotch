@@ -14,9 +14,12 @@ set(N3DS_SD_FOLDER "butterscotch" CACHE STRING "Game folder on the SD card: sdmc
 set(N3DS_UNIQUE_ID "0xB5C07" CACHE STRING "CIA unique ID (homebrew range 0x00300-0xF7FFF); title ID 00040000<id>00")
 set(N3DS_PRODUCT_CODE "CTR-P-BSCH" CACHE STRING "CIA product code")
 set(N3DS_ASSET_DIR "${CMAKE_SOURCE_DIR}/res/n3ds/${N3DS_SD_FOLDER}" CACHE PATH "Optional icon.png (48x48), banner.png (256x128) + banner.wav")
+set(N3DS_SCREEN_MODE "wide" CACHE STRING "Default top-screen mode: wide (widescreen hack), stretch or pillarbox")
 set(N3DS_TOOLS_DIR "/root/kfx/3ds-prefix/bin" CACHE PATH "Where makerom and bannertool are")
 
 add_compile_definitions(PLATFORM_N3DS)
+string(TOUPPER "${N3DS_SCREEN_MODE}" _n3ds_screen_mode)
+target_compile_definitions(butterscotch PRIVATE N3DS_DEFAULT_SCREEN_MODE=N3DS_SCREEN_${_n3ds_screen_mode})
 target_compile_definitions(butterscotch PRIVATE N3DS_SD_DIR="sdmc:/3ds/${N3DS_SD_FOLDER}/")
 # Revision of the SD card data this build expects (tools/n3ds/make_sd.sh writes it to the card). Raise it when a
 # build needs regenerated card data (e.g. a new gfx/ format); an older card then gets a clear message at startup.

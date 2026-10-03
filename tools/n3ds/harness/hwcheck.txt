@@ -1,0 +1,21 @@
+# Hardware-issue check (run_in_azahar.ps1 -Save <landing> -CpuClock 100): title -> load slot A (save-file I/O),
+# pause menu for 5 s, then walk right into the next room.
+after_room titleroom
+press 800 START 4
+press 900 START 4
+press 1000 A 4
+press 1100 A 4
+after_room rm_a0h01
+press 420 START 4
+screenshot 600
+press 720 START 4
+press 820 RIGHT 1200
+press 860 B 25
+press 1000 B 25
+press 1140 B 25
+press 1280 B 25
+press 1420 B 25
+press 1560 B 25
+screenshot 1100
+screenshot 1800
+exit 2000

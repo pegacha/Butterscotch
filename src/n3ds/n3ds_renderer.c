@@ -1,4 +1,5 @@
 #include "n3ds_renderer.h"
+#include "n3ds_prof.h"
 #include "n3ds_platform_config.h"
 #include "n3ds_unimpl.h"
 
@@ -291,11 +292,20 @@ typedef struct {
     C3D_Tex texture;
     uint32_t frame;
 } N3DSDeferredSurfaceFree;
+#define N3DS_TILE_CULL_KEY_SIZE 10
 
 typedef struct {
     Renderer base;
     N3DSSurface* surfaces; // stb_ds array, index = surface id
     N3DSDeferredSurfaceFree* deferredSurfaceFrees; // stb_ds array
+    // Freed surface textures kept for the next surface_create of the same size (stb_ds array): AM2R frees and
+    // recreates some surfaces every frame, and allocating render targets anew fragments VRAM.
+    N3DSDeferredSurfaceFree* surfacePool;
+    // Targets whose textures were dropped from the pool mid-frame, deleted after the frame (stb_ds array).
+    C3D_RenderTarget** orphanTargets;
+    // drawTile's visible room rectangle and the mapping values it was computed from.
+    float tileCullKey[N3DS_TILE_CULL_KEY_SIZE];
+    float tileCullLeft, tileCullTop, tileCullRight, tileCullBottom;
     uint32_t diagMappingLogs;
     int32_t currentTargetSurface; // RENDER_TARGET_HOST_FRAMEBUFFER = top screen
     float targetW;
@@ -1295,7 +1305,10 @@ static bool N3DSRenderer_tryLoadPackedDirectTextureBlob(N3DSRenderer* renderer, 
         free(blobData);
         return false;
     }
-    if (fread(blobData, 1, (size_t) entry.dataSize, renderer->packedDirectAssetFile) != (size_t) entry.dataSize) {
+    u64 ioStart = N3DSProf_begin();
+    bool readOk = fread(blobData, 1, (size_t) entry.dataSize, renderer->packedDirectAssetFile) == (size_t) entry.dataSize;
+    N3DSProf_end(N3DS_PROF_IO, ioStart);
+    if (!readOk) {
         free(blobData);
         return false;
     }
@@ -1434,7 +1447,10 @@ static bool N3DSRenderer_ensurePageBlobLoaded(N3DSRenderer* renderer, uint32_t p
     if (usingPackedAtlas) {
         fseek(pageFile, (long) dataOffset, SEEK_SET);
     }
-    if (fread(page->t3xData, 1, (size_t) size, pageFile) != (size_t) size) {
+    u64 ioStart = N3DSProf_begin();
+    bool readOk = fread(page->t3xData, 1, (size_t) size, pageFile) == (size_t) size;
+    N3DSProf_end(N3DS_PROF_IO, ioStart);
+    if (!readOk) {
         free(page->t3xData);
         page->t3xData = NULL;
         page->t3xSize = 0;
@@ -1485,8 +1501,10 @@ static bool N3DSRenderer_loadIndexed8Page(N3DSRenderer* renderer, N3DSLoadedAtla
         expanded[i] = palette[indexBlob[i]];
     }
 
+    u64 texStart = N3DSProf_begin();
     C3D_TexUpload(&page->texture, expanded);
     C3D_TexFlush(&page->texture);
+    N3DSProf_end(N3DS_PROF_TEX, texStart);
     linearFree(expanded);
     page->ready = true;
     renderer->framePageImports++;
@@ -1538,7 +1556,9 @@ static bool N3DSRenderer_loadPage(N3DSRenderer* renderer, uint32_t pageIndex) {
         return N3DSRenderer_loadIndexed8Page(renderer, page);
     }
 
+    u64 texStart = N3DSProf_begin();
     page->t3x = Tex3DS_TextureImport(page->t3xData, page->t3xSize, &page->texture, NULL, false);
+    N3DSProf_end(N3DS_PROF_TEX, texStart);
     if (page->t3x == NULL) {
         return false;
     }
@@ -1748,8 +1768,10 @@ static bool N3DSRenderer_ensureDirectTextureBlobLoaded(N3DSRenderer* renderer, N
         return false;
     }
 
+    u64 ioStart = N3DSProf_begin();
     bool ok = fread(blobData, 1, (size_t) size, file) == (size_t) size;
     fclose(file);
+    N3DSProf_end(N3DS_PROF_IO, ioStart);
     if (!ok) {
         free(blobData);
         return false;
@@ -1778,7 +1800,9 @@ static bool N3DSRenderer_loadDirectTextureAsset(N3DSRenderer* renderer, N3DSDire
         return false;
     }
 
+    u64 texStart = N3DSProf_begin();
     C2D_SpriteSheet sheet = C2D_SpriteSheetLoadFromMem(asset->blobData, asset->blobSize);
+    N3DSProf_end(N3DS_PROF_TEX, texStart);
     if (sheet == NULL) {
         asset->failed = true;
         return false;
@@ -4017,6 +4041,22 @@ static bool N3DSRenderer_drawPackedTileEntry(
     return drewAnything;
 }
 
+// Visible room-space rectangle of the active target (the camera offset lives in portOffset, not viewX/viewY).
+static void N3DSRenderer_getVisibleRoomRect(N3DSRenderer* renderer, float* left, float* top, float* right, float* bottom) {
+    float targetW = 0.0f, targetH = 0.0f;
+    N3DSRenderer_getActiveTargetSize(renderer, &targetW, &targetH);
+    float ox = renderer->frameOffsetX + renderer->portOffsetX;
+    float oy = renderer->frameOffsetY + renderer->portOffsetY;
+    float sx = renderer->viewScaleX != 0.0f ? renderer->viewScaleX : 1.0f;
+    float sy = renderer->viewScaleY != 0.0f ? renderer->viewScaleY : 1.0f;
+    float lx0 = (float) renderer->viewX + (0.0f - ox) / sx, lx1 = (float) renderer->viewX + (targetW - ox) / sx;
+    float ly0 = (float) renderer->viewY + (0.0f - oy) / sy, ly1 = (float) renderer->viewY + (targetH - oy) / sy;
+    *left = lx0 < lx1 ? lx0 : lx1;
+    *right = lx0 < lx1 ? lx1 : lx0;
+    *top = ly0 < ly1 ? ly0 : ly1;
+    *bottom = ly0 < ly1 ? ly1 : ly0;
+}
+
 static void N3DSRenderer_drawTile(Renderer* base, RoomTile* tile, float offsetX, float offsetY) {
     if (base == NULL || tile == NULL) return;
     int32_t srcW = (int32_t) tile->width;
@@ -4024,6 +4064,30 @@ static void N3DSRenderer_drawTile(Renderer* base, RoomTile* tile, float offsetX,
     if (srcW <= 0 || srcH <= 0) return;
 
     N3DSRenderer* renderer = (N3DSRenderer*) base;
+    // The runner hands over every tile in the room (a big AM2R room has thousands); drop the off-screen ones before
+    // any lookup. The visible rectangle is cached against the mapping it came from.
+    {
+        float targetW = 0.0f, targetH = 0.0f;
+        N3DSRenderer_getActiveTargetSize(renderer, &targetW, &targetH);
+        float key[N3DS_TILE_CULL_KEY_SIZE] = {
+            targetW, targetH, renderer->frameOffsetX, renderer->frameOffsetY, renderer->portOffsetX, renderer->portOffsetY,
+            renderer->viewScaleX, renderer->viewScaleY, (float) renderer->viewX, (float) renderer->viewY,
+        };
+        if (memcmp(key, renderer->tileCullKey, sizeof(key)) != 0) {
+            memcpy(renderer->tileCullKey, key, sizeof(key));
+            N3DSRenderer_getVisibleRoomRect(renderer, &renderer->tileCullLeft, &renderer->tileCullTop, &renderer->tileCullRight, &renderer->tileCullBottom);
+        }
+    }
+    {
+        float x0 = (float) tile->x + offsetX, x1 = x0 + (float) srcW * tile->scaleX;
+        float y0 = (float) tile->y + offsetY, y1 = y0 + (float) srcH * tile->scaleY;
+        if (x1 < x0) { float t = x0; x0 = x1; x1 = t; }
+        if (y1 < y0) { float t = y0; y0 = y1; y1 = t; }
+        if (x1 < renderer->tileCullLeft - 1.0f || x0 > renderer->tileCullRight + 1.0f ||
+            y1 < renderer->tileCullTop - 1.0f || y0 > renderer->tileCullBottom + 1.0f) {
+            return;
+        }
+    }
     uint32_t bgr = tile->color & 0x00FFFFFFu;
     uint8_t alphaByte = (uint8_t) ((tile->color >> 24) & 0xFFu);
     float alpha = (alphaByte == 0) ? 1.0f : (float) alphaByte / 255.0f;
@@ -4163,22 +4227,8 @@ static void N3DSRenderer_drawTiled(Renderer* base, int32_t tpagIndex, float orig
     int32_t tilesY = tileY ? ((int32_t) ((endY - startY) / tileH) + 1) : 1;
     if (tilesX <= 0 || tilesY <= 0) return;
 
-    // Visible room-space rectangle of the active target (the camera offset lives in portOffset, not viewX/viewY).
     float viewLeft, viewTop, viewRight, viewBottom;
-    {
-        float targetW = 0.0f, targetH = 0.0f;
-        N3DSRenderer_getActiveTargetSize(renderer, &targetW, &targetH);
-        float ox = renderer->frameOffsetX + renderer->portOffsetX;
-        float oy = renderer->frameOffsetY + renderer->portOffsetY;
-        float sx = renderer->viewScaleX != 0.0f ? renderer->viewScaleX : 1.0f;
-        float sy = renderer->viewScaleY != 0.0f ? renderer->viewScaleY : 1.0f;
-        float lx0 = (float) renderer->viewX + (0.0f - ox) / sx, lx1 = (float) renderer->viewX + (targetW - ox) / sx;
-        float ly0 = (float) renderer->viewY + (0.0f - oy) / sy, ly1 = (float) renderer->viewY + (targetH - oy) / sy;
-        viewLeft = lx0 < lx1 ? lx0 : lx1;
-        viewRight = lx0 < lx1 ? lx1 : lx0;
-        viewTop = ly0 < ly1 ? ly0 : ly1;
-        viewBottom = ly0 < ly1 ? ly1 : ly0;
-    }
+    N3DSRenderer_getVisibleRoomRect(renderer, &viewLeft, &viewTop, &viewRight, &viewBottom);
     int32_t startTileX = 0;
     int32_t endTileX = tilesX;
     int32_t startTileY = 0;
@@ -4779,6 +4829,13 @@ static void N3DSRenderer_releaseSurfaceTexture(N3DSRenderer* renderer, N3DSSurfa
     memset(&surface->texture, 0, sizeof(surface->texture));
 }
 
+#define N3DS_SURFACE_POOL_MAX 6
+
+static void N3DSRenderer_deleteSurfaceTexture(N3DSDeferredSurfaceFree* entry) {
+    if (entry->target != NULL) C3D_RenderTargetDelete(entry->target);
+    if (entry->texture.data != NULL) C3D_TexDelete(&entry->texture);
+}
+
 void N3DSRenderer_collectGarbage(Renderer* base, bool all) {
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     for (ptrdiff_t i = 0; i < arrlen(renderer->deferredSurfaceFrees);) {
@@ -4787,10 +4844,68 @@ void N3DSRenderer_collectGarbage(Renderer* base, bool all) {
             i++;
             continue;
         }
-        if (pending->target != NULL) C3D_RenderTargetDelete(pending->target);
-        if (pending->texture.data != NULL) C3D_TexDelete(&pending->texture);
+        // The GPU is done with it: keep it for reuse (the oldest pooled one makes room).
+        if (!all && pending->target != NULL && pending->texture.data != NULL) {
+            if (arrlen(renderer->surfacePool) >= N3DS_SURFACE_POOL_MAX) {
+                N3DSRenderer_deleteSurfaceTexture(&renderer->surfacePool[0]);
+                arrdel(renderer->surfacePool, 0);
+            }
+            arrput(renderer->surfacePool, *pending);
+        } else {
+            N3DSRenderer_deleteSurfaceTexture(pending);
+        }
         arrdelswap(renderer->deferredSurfaceFrees, i);
     }
+    for (ptrdiff_t i = 0; i < arrlen(renderer->orphanTargets); i++) C3D_RenderTargetDelete(renderer->orphanTargets[i]);
+    arrsetlen(renderer->orphanTargets, 0);
+    if (all) {
+        for (ptrdiff_t i = 0; i < arrlen(renderer->surfacePool); i++) N3DSRenderer_deleteSurfaceTexture(&renderer->surfacePool[i]);
+        arrsetlen(renderer->surfacePool, 0);
+    }
+}
+
+static bool N3DSRenderer_takePooledSurface(N3DSRenderer* renderer, N3DSSurface* surface, uint16_t texW, uint16_t texH, GPU_TEXCOLOR fmt) {
+    for (ptrdiff_t i = arrlen(renderer->surfacePool) - 1; i >= 0; i--) {
+        N3DSDeferredSurfaceFree* entry = &renderer->surfacePool[i];
+        if (entry->texture.width != texW || entry->texture.height != texH || entry->texture.fmt != fmt) continue;
+        surface->texture = entry->texture;
+        surface->target = entry->target;
+        arrdel(renderer->surfacePool, i);
+        return true;
+    }
+    return false;
+}
+
+// Gives the pooled textures' VRAM back (the pool has nothing that size and the allocation failed). This can run
+// mid-frame, where citro3d won't delete render targets: the pooled textures are idle (two frames old), so their
+// memory goes now and the targets after the frame.
+static void N3DSRenderer_drainSurfacePool(N3DSRenderer* renderer) {
+    for (ptrdiff_t i = 0; i < arrlen(renderer->surfacePool); i++) {
+        N3DSDeferredSurfaceFree* entry = &renderer->surfacePool[i];
+        if (entry->texture.data != NULL) C3D_TexDelete(&entry->texture);
+        if (entry->target != NULL) arrput(renderer->orphanTargets, entry->target);
+    }
+    arrsetlen(renderer->surfacePool, 0);
+}
+
+// A render target in VRAM (citro3d can't render into linear memory), from the pool or new.
+static bool N3DSRenderer_allocSurfaceTarget(N3DSRenderer* renderer, N3DSSurface* surface, uint16_t texW, uint16_t texH, GPU_TEXCOLOR fmt) {
+    if (N3DSRenderer_takePooledSurface(renderer, surface, texW, texH, fmt)) return true;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (C3D_TexInitVRAM(&surface->texture, texW, texH, fmt)) {
+            surface->target = C3D_RenderTargetCreateFromTex(&surface->texture, GPU_TEXFACE_2D, 0, -1);
+            if (surface->target != NULL) return true;
+            C3D_TexDelete(&surface->texture);
+            memset(&surface->texture, 0, sizeof(surface->texture));
+            return false;
+        }
+        if (attempt == 0) {
+            if (arrlen(renderer->surfacePool) == 0) break;
+            N3DSRenderer_drainSurfacePool(renderer);
+        }
+    }
+    memset(&surface->texture, 0, sizeof(surface->texture));
+    return false;
 }
 
 static bool N3DSRenderer_allocSurfaceTexture(N3DSRenderer* renderer, N3DSSurface* surface, int32_t width, int32_t height) {
@@ -4808,18 +4923,42 @@ static bool N3DSRenderer_allocSurfaceTexture(N3DSRenderer* renderer, N3DSSurface
     }
     uint16_t texW = N3DSRenderer_pow2Size(backedW);
     uint16_t texH = N3DSRenderer_pow2Size(backedH);
-    bool ok = C3D_TexInitVRAM(&surface->texture, texW, texH, GPU_RGBA8);
-    surface->inVRAM = ok;
-    if (!ok) ok = C3D_TexInit(&surface->texture, texW, texH, GPU_RGBA8);
-    if (!ok) {
-        logError("N3DS: surface %dx%d: out of texture memory\n", (int) width, (int) height);
-        memset(&surface->texture, 0, sizeof(surface->texture));
-        return false;
+    u64 texStart = N3DSProf_begin();
+    // 32-bit when it fits. VRAM is two 3 MB banks and a render target has to sit in one, so a big surface may not
+    // (AM2R's 2048x1024 pause map wants 4 MB at RGBA8, 2 MB at RGBA5551, with ~2 MB free per bank). Then it gets
+    // 16 bits, and then less stored area: halving the larger side keeps the top-left part, which is where AM2R
+    // draws (its map uses about 600x464 of the surface).
+    bool ok = N3DSRenderer_allocSurfaceTarget(renderer, surface, texW, texH, GPU_RGBA8);
+    GPU_TEXCOLOR fmt = GPU_RGBA8;
+    while (!ok) {
+        ok = N3DSRenderer_allocSurfaceTarget(renderer, surface, texW, texH, GPU_RGBA5551);
+        if (ok) {
+            fmt = GPU_RGBA5551;
+            break;
+        }
+        if (texW < 256 && texH < 256) break;
+        if (texW > texH) texW /= 2;
+        else texH /= 2;
+        if (backedW > texW) backedW = texW;
+        if (backedH > texH) backedH = texH;
+        ok = N3DSRenderer_allocSurfaceTarget(renderer, surface, texW, texH, GPU_RGBA8);
     }
-    surface->target = C3D_RenderTargetCreateFromTex(&surface->texture, GPU_TEXFACE_2D, 0, -1);
-    if (surface->target == NULL) {
-        C3D_TexDelete(&surface->texture);
-        memset(&surface->texture, 0, sizeof(surface->texture));
+    if (ok && (fmt != GPU_RGBA8 || backedW < (width > 1024 ? 1024 : width) || backedH < (height > 1024 ? 1024 : height))) {
+        logWarn("N3DS: surface %dx%d stores %dx%d at %s (VRAM)\n", (int) width, (int) height, (int) backedW, (int) backedH,
+            fmt == GPU_RGBA8 ? "RGBA8" : "RGBA5551");
+    }
+    N3DSProf_end(N3DS_PROF_TEX, texStart);
+    surface->inVRAM = ok;
+    if (!ok) {
+        uint32_t liveBytes = 0, liveCount = 0;
+        for (ptrdiff_t i = 0; i < arrlen(renderer->surfaces); i++) {
+            if (!renderer->surfaces[i].exists || renderer->surfaces[i].texture.data == NULL) continue;
+            liveCount++;
+            liveBytes += renderer->surfaces[i].texture.size;
+        }
+        logError("N3DS: surface %dx%d: out of VRAM for a %dx%d render target (VRAM free %lu KB; %lu surfaces %lu KB, tile chunks %lu KB, pool %d)\n",
+            (int) width, (int) height, (int) texW, (int) texH, (unsigned long) (vramSpaceFree() / 1024u), (unsigned long) liveCount,
+            (unsigned long) (liveBytes / 1024u), (unsigned long) (renderer->tileLayerChunkVRAMBytes / 1024u), (int) arrlen(renderer->surfacePool));
         return false;
     }
     C3D_TexSetFilter(&surface->texture, GPU_NEAREST, GPU_NEAREST);

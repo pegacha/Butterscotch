@@ -1,6 +1,7 @@
 #include "n3ds_audio_system.h"
 #include "n3ds_debug_log.h"
 #include "n3ds_platform_config.h"
+#include "n3ds_prof.h"
 
 #include "../data_win.h"
 #include "../log.h"
@@ -3840,11 +3841,24 @@ static bool N3DSAudio_destroyStream(AudioSystem* base, int32_t streamIndex) {
     return true;
 }
 
+static int32_t N3DSAudio_playSoundTimed(AudioSystem* base, int32_t soundIndex, int32_t priority, bool loop) {
+    u64 start = N3DSProf_begin();
+    int32_t result = N3DSAudio_playSound(base, soundIndex, priority, loop);
+    N3DSProf_end(N3DS_PROF_AUDIO, start);
+    return result;
+}
+
+static void N3DSAudio_updateTimed(AudioSystem* base, float deltaTime) {
+    u64 start = N3DSProf_begin();
+    N3DSAudio_update(base, deltaTime);
+    N3DSProf_end(N3DS_PROF_AUDIO, start);
+}
+
 static AudioSystemVtable N3DSAudio_vtable = {
     .init = N3DSAudio_init,
     .destroy = N3DSAudio_destroy,
-    .update = N3DSAudio_update,
-    .playSound = N3DSAudio_playSound,
+    .update = N3DSAudio_updateTimed,
+    .playSound = N3DSAudio_playSoundTimed,
     .stopSound = N3DSAudio_stopSound,
     .stopAll = N3DSAudio_stopAll,
     .isPlaying = N3DSAudio_isPlaying,

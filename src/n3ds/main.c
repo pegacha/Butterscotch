@@ -16,6 +16,7 @@
 #include "n3ds_cached_file_system.h"
 #include "n3ds_input.h"
 #include "n3ds_platform_config.h"
+#include "n3ds_prof.h"
 #include "n3ds_renderer.h"
 #include "n3ds_unimpl.h"
 
@@ -39,6 +40,8 @@
 #define N3DS_TOP_SCREEN_W 400
 #define N3DS_TOP_SCREEN_H 240
 
+extern u32 __ctru_heap_size;
+
 void N3DSLog_init(void);
 void N3DSLog_close(void);
 
@@ -55,7 +58,24 @@ typedef struct {
 static char gN3DSBootLogLines[N3DS_BOOT_LOG_MAX_LINES][N3DS_BOOT_LOG_LINE_CHARS];
 static int gN3DSBootLogLineCount = 0;
 
-#define N3DS_MONITOR_LINES 7
+#define N3DS_MONITOR_LINES 8
+
+u64 gN3DSProfTicks[N3DS_PROF_COUNT];
+
+// Where one frame's time went, in ms. Step is the game logic (GML), wait is citro3d waiting for the GPU and VBlank,
+// draw is building the GPU commands; IO, TX, FS and AU are slices of those (see n3ds_prof.h).
+typedef enum {
+    N3DS_FT_FRAME,
+    N3DS_FT_STEP,
+    N3DS_FT_WAIT,
+    N3DS_FT_DRAW,
+    N3DS_FT_IO,
+    N3DS_FT_TEX,
+    N3DS_FT_FS,
+    N3DS_FT_AUDIO,
+    N3DS_FT_PREWARM,
+    N3DS_FT_COUNT
+} N3DSFrameTime;
 
 typedef struct {
     C2D_TextBuf textBuf;
@@ -64,8 +84,10 @@ typedef struct {
     C2D_Text texts[N3DS_MONITOR_LINES];
     bool laidOut;
     double displayedFps;
-    double displayedRenderMs;
-    double sampledRenderMs;
+    double displayed[N3DS_FT_COUNT];
+    double displayedMaxFrameMs;
+    double sampled[N3DS_FT_COUNT];
+    double sampledMaxFrameMs;
     uint32_t sampledFrames;
     u64 sampleStartMs;
 } N3DSDebugMonitor;
@@ -102,21 +124,24 @@ static void N3DSDebugMonitor_free(N3DSDebugMonitor* monitor) {
     }
 }
 
-static void N3DSDebugMonitor_tickFrame(N3DSDebugMonitor* monitor, double renderMs) {
+static void N3DSDebugMonitor_tickFrame(N3DSDebugMonitor* monitor, const double* frameTimes) {
     if (monitor == NULL) return;
 
     monitor->sampledFrames++;
-    monitor->sampledRenderMs += renderMs;
+    repeat(N3DS_FT_COUNT, i) monitor->sampled[i] += frameTimes[i];
+    if (frameTimes[N3DS_FT_FRAME] > monitor->sampledMaxFrameMs) monitor->sampledMaxFrameMs = frameTimes[N3DS_FT_FRAME];
     u64 nowMs = osGetTime();
     u64 elapsedMs = nowMs - monitor->sampleStartMs;
     if (elapsedMs < 250) return;
 
     monitor->displayedFps = ((double) monitor->sampledFrames * 1000.0) / (double) elapsedMs;
-    monitor->displayedRenderMs = monitor->sampledFrames > 0
-        ? monitor->sampledRenderMs / (double) monitor->sampledFrames
-        : 0.0;
+    repeat(N3DS_FT_COUNT, i) {
+        monitor->displayed[i] = monitor->sampled[i] / (double) monitor->sampledFrames;
+        monitor->sampled[i] = 0.0;
+    }
+    monitor->displayedMaxFrameMs = monitor->sampledMaxFrameMs;
+    monitor->sampledMaxFrameMs = 0.0;
     monitor->sampledFrames = 0;
-    monitor->sampledRenderMs = 0.0;
     monitor->sampleStartMs = nowMs;
 }
 
@@ -135,93 +160,46 @@ static void N3DSDebugMonitor_draw(N3DSDebugMonitor* monitor, Runner* runner, Ren
     }
 
     uint32_t atlasVRAMBytes = N3DSRenderer_getResidentAtlasVRAMBytes(renderer);
-    uint32_t atlasVRAMLimitBytes = N3DSRenderer_getResidentAtlasVRAMLimitBytes(renderer);
     uint32_t atlasPageCount = N3DSRenderer_getResidentAtlasPageCount(renderer);
-    uint32_t atlasPageLimit = N3DSRenderer_getResidentAtlasPageLimit(renderer);
     uint32_t directVRAMBytes = N3DSRenderer_getResidentDirectAssetVRAMBytes(renderer);
-    uint32_t trackedVRAMBytes = atlasVRAMBytes + directVRAMBytes;
-    uint32_t ramFreeBytes = osGetMemRegionFree(MEMREGION_APPLICATION);
-    uint32_t ramTotalBytes = osGetMemRegionSize(MEMREGION_APPLICATION);
-    uint32_t linearFreeBytes = linearSpaceFree();
+    // The heap takes the whole app region up front, so the region's free space says nothing: ask malloc.
+    struct mallinfo mi = mallinfo();
 
-    char fpsLine[96];
-    char vramLine[64];
-    char atlasLine[96];
-    char ramLine[96];
-    char audioLine[96];
-    char roomLine[96];
-    char vramUsed[24];
-    char vramTotal[24];
-    char atlasUsed[24];
-    char atlasLimit[24];
-    char directUsed[24];
-    char ramFree[24];
-    char ramTotal[24];
-    char linearFree[24];
-    char audioCached[24];
-    char audioLimit[24];
-    uint32_t cachedSounds = 0;
-    uint32_t totalSounds = 0;
-    uint32_t cachedSoundBytes = 0;
-    uint32_t cacheLimitBytes = 0;
-
-    char unimplLine[64];
-    snprintf(unimplLine, sizeof(unimplLine), "UNIMPL %lu", (unsigned long) N3DS_unimplCount());
-
-    snprintf(
-        fpsLine,
-        sizeof(fpsLine),
-        "FPS %.1f  R %.1fms",
-        monitor->displayedFps > 0.0 ? monitor->displayedFps : 0.0,
-        monitor->displayedRenderMs > 0.0 ? monitor->displayedRenderMs : 0.0
-    );
-    N3DS_formatDebugSize(vramUsed, sizeof(vramUsed), trackedVRAMBytes);
+    char vramUsed[24], vramTotal[24], heapUsed[24], heapTotal[24], linearFree[24];
+    N3DS_formatDebugSize(vramUsed, sizeof(vramUsed), atlasVRAMBytes + directVRAMBytes);
     N3DS_formatDebugSize(vramTotal, sizeof(vramTotal), N3DS_TOTAL_VRAM_BYTES);
-    N3DS_formatDebugSize(atlasUsed, sizeof(atlasUsed), atlasVRAMBytes);
-    N3DS_formatDebugSize(atlasLimit, sizeof(atlasLimit), atlasVRAMLimitBytes);
-    N3DS_formatDebugSize(directUsed, sizeof(directUsed), directVRAMBytes);
-    N3DS_formatDebugSize(ramFree, sizeof(ramFree), ramFreeBytes);
-    N3DS_formatDebugSize(ramTotal, sizeof(ramTotal), ramTotalBytes);
-    N3DS_formatDebugSize(linearFree, sizeof(linearFree), linearFreeBytes);
-    N3DS_formatDebugSize(audioCached, sizeof(audioCached), cachedSoundBytes);
-    N3DS_formatDebugSize(audioLimit, sizeof(audioLimit), cacheLimitBytes);
-    snprintf(vramLine, sizeof(vramLine), "VRAM %s/%s",
-        vramUsed,
-        vramTotal);
-    snprintf(atlasLine, sizeof(atlasLine), "AT %lu/%lu %s  DR %s",
-        (unsigned long) atlasPageCount,
-        (unsigned long) atlasPageLimit,
-        atlasUsed,
-        directUsed);
-    snprintf(ramLine, sizeof(ramLine), "RAM %s/%s  L %s",
-        ramFree,
-        ramTotal,
-        linearFree);
-    snprintf(audioLine, sizeof(audioLine), "AUD %lu/%lu %s/%s",
-        (unsigned long) cachedSounds,
-        (unsigned long) totalSounds,
-        audioCached,
-        audioLimit);
+    N3DS_formatDebugSize(heapUsed, sizeof(heapUsed), (uint32_t) mi.uordblks);
+    N3DS_formatDebugSize(heapTotal, sizeof(heapTotal), __ctru_heap_size);
+    N3DS_formatDebugSize(linearFree, sizeof(linearFree), linearSpaceFree());
+
+    const double* t = monitor->displayed;
+    char fpsLine[96], timeLine[96], sliceLine[96], vramLine[96], ramLine[96], unimplLine[64], roomLine[96];
+    snprintf(fpsLine, sizeof(fpsLine), "FPS %.1f  %.1fms  max %.0f", monitor->displayedFps, t[N3DS_FT_FRAME], monitor->displayedMaxFrameMs);
+    snprintf(timeLine, sizeof(timeLine), "S %.1f  W %.1f  D %.1f  P %.1f", t[N3DS_FT_STEP], t[N3DS_FT_WAIT], t[N3DS_FT_DRAW], t[N3DS_FT_PREWARM]);
+    snprintf(sliceLine, sizeof(sliceLine), "IO %.1f  TX %.1f  FS %.1f  AU %.1f", t[N3DS_FT_IO], t[N3DS_FT_TEX], t[N3DS_FT_FS], t[N3DS_FT_AUDIO]);
+    snprintf(vramLine, sizeof(vramLine), "VRAM %s/%s  AT %lu", vramUsed, vramTotal, (unsigned long) atlasPageCount);
+    snprintf(ramLine, sizeof(ramLine), "RAM %s/%s  L %s", heapUsed, heapTotal, linearFree);
+    snprintf(unimplLine, sizeof(unimplLine), "UNIMPL %lu", (unsigned long) N3DS_unimplCount());
     snprintf(roomLine, sizeof(roomLine), "R %.28s", roomName);
 
     N3DSRenderer_beginBottomScreenGUI(renderer, 320, 240);
     const float boxX = 92.0f;
     const float boxY = 8.0f;
     const float boxW = 220.0f;
-    const float boxH = 110.0f;
+    const float boxH = 127.0f;
     const float textX = boxX + 7.0f;
     C2D_DrawRectSolid(boxX, boxY, 0.0f, boxW, boxH, C2D_Color32(8, 10, 16, 218));
     C2D_DrawRectSolid(boxX, boxY, 0.0f, boxW, 2.0f, C2D_Color32(77, 118, 255, 245));
     C2D_DrawRectSolid(boxX, boxY + boxH - 1.0f, 0.0f, boxW, 1.0f, C2D_Color32(32, 46, 78, 230));
     // System-font text, one quad per character (the old per-pixel bitmap font cost ~2000 quads a frame, half of
     // citro2d's per-frame object budget).
-    const char* lines[N3DS_MONITOR_LINES] = { "DBG", fpsLine, vramLine, atlasLine, ramLine, unimplLine, roomLine };
-    const float xs[N3DS_MONITOR_LINES] = { textX, boxX + 42.0f, textX, textX, textX, textX, textX };
-    const float ys[N3DS_MONITOR_LINES] = { 5.0f, 5.0f, 23.0f, 40.0f, 57.0f, 74.0f, 91.0f };
+    const char* lines[N3DS_MONITOR_LINES] = { "DBG", fpsLine, timeLine, sliceLine, vramLine, ramLine, unimplLine, roomLine };
+    const float xs[N3DS_MONITOR_LINES] = { textX, boxX + 42.0f, textX, textX, textX, textX, textX, textX };
+    const float ys[N3DS_MONITOR_LINES] = { 5.0f, 5.0f, 22.0f, 39.0f, 56.0f, 73.0f, 90.0f, 107.0f };
     const u32 colors[N3DS_MONITOR_LINES] = {
         C2D_Color32(255, 255, 255, 255), C2D_Color32(196, 230, 255, 255), C2D_Color32(196, 230, 255, 255),
-        C2D_Color32(146, 188, 236, 255), C2D_Color32(196, 230, 255, 255), C2D_Color32(255, 196, 196, 255),
-        C2D_Color32(255, 230, 163, 255),
+        C2D_Color32(146, 188, 236, 255), C2D_Color32(196, 230, 255, 255), C2D_Color32(196, 230, 255, 255),
+        C2D_Color32(255, 196, 196, 255), C2D_Color32(255, 230, 163, 255),
     };
     bool changed = !monitor->laidOut;
     repeat(N3DS_MONITOR_LINES, i) {
@@ -615,6 +593,8 @@ int main(int argc, char** argv) {
     double statsStepMs = 0.0, statsDrawMs = 0.0, statsWaitMs = 0.0;
     double pacedSpeed = 0.0;
     uint32_t lastUnimplCount = 0;
+    u64 lastSlowLogMs = 0;
+    double statsMaxFrameMs = 0.0;
 
     while (aptMainLoop() && !runner->shouldExit) {
         // citro3d paces frames on VBlank at the room speed; a second sleep-based pacer here halved the rate whenever
@@ -626,6 +606,8 @@ int main(int argc, char** argv) {
             pacedSpeed = gameSpeed;
         }
 
+        u64 frameStartTick = svcGetSystemTick();
+        memset(gN3DSProfTicks, 0, sizeof(gN3DSProfTicks));
         uint64_t frameStartNow = nowNanos();
         runner->deltaTime = (int64_t) (frameStartNow - lastFrameStartTime) / 1000.0;
         lastFrameStartTime = frameStartNow;
@@ -645,8 +627,8 @@ int main(int argc, char** argv) {
         u64 stepStartTick = svcGetSystemTick();
         Runner_step(runner);
 #ifdef ENABLE_VM_GML_PROFILER
-        if (runner->frameCount > 0 && runner->frameCount % 300 == 0) {
-            char* report = Profiler_createReport(vm->profiler, 15, 300);
+        if (runner->frameCount > 0 && runner->frameCount % 120 == 0) {
+            char* report = Profiler_createReport(vm->profiler, 25, 120);
             if (report != NULL) {
                 logInfo("%s\n", report);
                 free(report);
@@ -660,14 +642,17 @@ int main(int argc, char** argv) {
         runner->audioSystem->vtable->update(runner->audioSystem, dt);
         double stepMs = (double) (svcGetSystemTick() - stepStartTick) * 1000.0 / (double) SYSCLOCK_ARM11;
 
-        if (runner->currentRoom != lastRoom) {
+        bool roomChanged = runner->currentRoom != lastRoom;
+        if (roomChanged) {
             lastRoom = runner->currentRoom;
             logInfo("Room %d: %s (%dx%d, speed %d)\n", (int) runner->currentRoomIndex, runner->currentRoom->name,
                 (int) runner->currentRoom->width, (int) runner->currentRoom->height, (int) runner->currentRoom->speed);
+            u64 prewarmStart = N3DSProf_begin();
             N3DSRenderer_prewarmRoom(renderer, runner);
 #ifdef N3DS_ENABLE_AUDIO
             N3DSAudio_prewarmRoom(runner->audioSystem, runner);
 #endif
+            N3DSProf_end(N3DS_PROF_PREWARM, prewarmStart);
             N3DS_logMemory("room start");
         }
 
@@ -725,8 +710,33 @@ int main(int argc, char** argv) {
         renderer->vtable->flush(renderer);
         C3D_FrameEnd(0);
         N3DSRenderer_collectGarbage(renderer, false);
-        double drawMs = (double) (svcGetSystemTick() - drawStartTick) * 1000.0 / (double) SYSCLOCK_ARM11;
-        N3DSDebugMonitor_tickFrame(&debugMonitor, drawMs);
+        N3DSCachedFileSystem_flush(fileSystem, false);
+        u64 frameEndTick = svcGetSystemTick();
+        double drawMs = N3DSProf_ms(frameEndTick - drawStartTick);
+        double frameTimes[N3DS_FT_COUNT] = {
+            [N3DS_FT_FRAME] = N3DSProf_ms(frameEndTick - frameStartTick),
+            [N3DS_FT_STEP] = stepMs,
+            [N3DS_FT_WAIT] = waitMs,
+            [N3DS_FT_DRAW] = drawMs,
+            [N3DS_FT_IO] = N3DSProf_ms(gN3DSProfTicks[N3DS_PROF_IO]),
+            [N3DS_FT_TEX] = N3DSProf_ms(gN3DSProfTicks[N3DS_PROF_TEX]),
+            [N3DS_FT_FS] = N3DSProf_ms(gN3DSProfTicks[N3DS_PROF_FS]),
+            [N3DS_FT_AUDIO] = N3DSProf_ms(gN3DSProfTicks[N3DS_PROF_AUDIO]),
+            [N3DS_FT_PREWARM] = N3DSProf_ms(gN3DSProfTicks[N3DS_PROF_PREWARM]),
+        };
+        N3DSDebugMonitor_tickFrame(&debugMonitor, frameTimes);
+        if (frameTimes[N3DS_FT_FRAME] > statsMaxFrameMs) statsMaxFrameMs = frameTimes[N3DS_FT_FRAME];
+        // A frame over 100 ms is a visible hitch: say where it went (at most twice a second, so a long stall
+        // doesn't turn into SD writes of its own).
+        u64 frameEndMs = osGetTime();
+        if (roomChanged || (frameTimes[N3DS_FT_FRAME] > 100.0 && frameEndMs - lastSlowLogMs >= 500u)) {
+            if (!roomChanged) lastSlowLogMs = frameEndMs;
+            logInfo("%s %d (%s): %.1f ms = step %.1f + wait %.1f + draw %.1f + prewarm %.1f; io %.1f, tex %.1f, fs %.1f, audio %.1f\n",
+                roomChanged ? "Room frame" : "Slow frame", (int) runner->frameCount,
+                runner->currentRoom != NULL ? runner->currentRoom->name : "-",
+                frameTimes[N3DS_FT_FRAME], stepMs, waitMs, drawMs, frameTimes[N3DS_FT_PREWARM],
+                frameTimes[N3DS_FT_IO], frameTimes[N3DS_FT_TEX], frameTimes[N3DS_FT_FS], frameTimes[N3DS_FT_AUDIO]);
+        }
 
         if (N3DSInput_exitRequested()) {
             FILE* done = fopen(N3DS_SD_DIR "done.txt", "w");
@@ -750,8 +760,8 @@ int main(int argc, char** argv) {
 #ifdef N3DS_ENABLE_AUDIO
             effects = N3DSAudio_effectsStarted(runner->audioSystem);
 #endif
-            logInfo("Perf: %.1f fps, step %.2f ms, draw %.2f ms, gpu/vblank wait %.2f ms (avg over %u frames), room %s, heap used %lu KB, linear free %lu KB, sfx %lu\n",
-                (double) statsFrames / seconds, statsStepMs / statsFrames, statsDrawMs / statsFrames, statsWaitMs / statsFrames, (unsigned) statsFrames,
+            logInfo("Perf: %.1f fps, step %.2f ms, draw %.2f ms, gpu/vblank wait %.2f ms (avg over %u frames, worst %.0f ms), room %s, heap used %lu KB, linear free %lu KB, sfx %lu\n",
+                (double) statsFrames / seconds, statsStepMs / statsFrames, statsDrawMs / statsFrames, statsWaitMs / statsFrames, (unsigned) statsFrames, statsMaxFrameMs,
                 runner->currentRoom != NULL ? runner->currentRoom->name : "-",
                 (unsigned long) (mi.uordblks / 1024u), (unsigned long) (linearSpaceFree() / 1024u), (unsigned long) effects);
             statsStartMs = nowMs;
@@ -759,6 +769,7 @@ int main(int argc, char** argv) {
             statsStepMs = 0.0;
             statsDrawMs = 0.0;
             statsWaitMs = 0.0;
+            statsMaxFrameMs = 0.0;
             if (N3DS_unimplCount() != lastUnimplCount) {
                 lastUnimplCount = N3DS_unimplCount();
                 N3DS_unimplDump("periodic");

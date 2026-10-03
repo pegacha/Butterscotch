@@ -1,0 +1,10 @@
+# Load slot A, open the pause menu in the landing site and leave it open (for the GML profiler).
+after_room titleroom
+press 800 START 4
+press 900 START 4
+press 1000 A 4
+press 1100 A 4
+after_room rm_a0h01
+press 420 START 4
+screenshot 600
+exit 1000

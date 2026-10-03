@@ -3882,7 +3882,9 @@ static void persistRoomState(Runner* runner, int32_t roomIndex) {
         Instance* inst = runner->instances[i];
         if (inst->persistent) {
             arrput(keptInstances, inst);
-        } else if (inst->active) {
+        } else if (!inst->destroyed) {
+            // Deactivated instances belong to the room too (GameMaker keeps them, still deactivated). AM2R deactivates
+            // every solid away from the view each step, so dropping them emptied the room on every pause.
             arrput(state->instances, inst);
         } else {
             hmdel(runner->instancesById, inst->instanceId);

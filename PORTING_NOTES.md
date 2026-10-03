@@ -93,6 +93,13 @@ Bottom screen (top screen while paused; toggle Start+Select): FPS, average frame
 thread only); VRAM, heap used/total, linear free, UNIMPL count, room. `log.txt`: a `Perf:` line every 5 s, every
 room's first frame and any frame over 100 ms with the same breakdown.
 
+## Upstream engine fixes
+
+-  : deactivated instances are kept with a persistent room (GameMaker keeps them,
+  still deactivated); they were freed. AM2R deactivates every solid away from the view each step and keeps the room
+  you pause in as persistent, so every pause emptied the room (142 -> 44 -> 14 instances): Samus fell through the
+  world, and could vanish on the next room change.
+
 ## Cinnamon engine changes re-applied
 
 None so far: AM2R runs on upstream's engine unmodified (no AUDO header parsing, `normalizeFixedArrayScope` or

@@ -238,7 +238,7 @@ static void adoptFinishedWrites(N3DSCachedFileSystem* c) {
         ptrdiff_t i = shgeti(c->contents, job->key);
         N3DSFileEntry* e = i >= 0 ? &c->contents[i].value : NULL;
         if (e != NULL) e->writing = false;
-        logInfo("%s %s (%ld bytes)\n", job->ok ? "Saved" : "Could not save", job->path, (long) job->size);
+        logInfo("%s %s (%ld bytes)\n", job->ok ? (job->exists ? "Saved" : "Deleted") : "Could not save", job->path, (long) job->size);
         if (e != NULL && job->ok) {
             if (e->disk != e->data) free(e->disk);
             e->disk = job->data;

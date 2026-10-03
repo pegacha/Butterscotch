@@ -1,0 +1,13 @@
+# Load slot A, pause and resume twice (persistent room restore keeps the whole room).
+after_room titleroom
+press 800 START 4
+press 900 START 4
+press 1000 A 4
+press 1100 A 4
+after_room rm_a0h01
+press 420 START 4
+press 560 START 4
+press 700 START 4
+press 840 START 4
+screenshot 960
+exit 980

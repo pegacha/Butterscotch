@@ -464,7 +464,21 @@ static void N3DS_logMemory(const char* when) {
         (unsigned long) (vramSpaceFree() / 1024u));
 }
 
+// 3DS threads start with the VFP in "RunFast" with rounding toward zero (FPSCR 0x03C00000); a PC rounds to nearest
+// and keeps denormals. GameMaker games' movement and collision code leans on exact double arithmetic (fractional
+// speeds, floor() of positions, pixel-snapping loops), so round toward zero puts Samus a hair off where the game
+// expects her (47.9999 instead of 48) and she can slip into or through blocks while moving vertically. The game
+// runs on this thread only. Returns the FPSCR found, for the log.
+static uint32_t N3DS_useIeeeRounding(void) {
+    uint32_t fpscr;
+    __asm__ volatile("vmrs %0, fpscr" : "=r"(fpscr));
+    uint32_t ieee = fpscr & ~((3u << 22) | (1u << 24)); // round to nearest, no flush-to-zero
+    __asm__ volatile("vmsr fpscr, %0" : : "r"(ieee));
+    return fpscr;
+}
+
 int main(int argc, char** argv) {
+    uint32_t startFpscr = N3DS_useIeeeRounding();
     gfxInitDefault();
     romfsInit();
     osSetSpeedupEnable(true);
@@ -477,6 +491,14 @@ int main(int argc, char** argv) {
     bool isNew3DS = false;
     APT_CheckNew3DS(&isNew3DS);
     logInfo("Console: %s, speedup %s\n", isNew3DS ? "New 3DS" : "Old 3DS", isNew3DS ? "on" : "n/a");
+    {
+        uint32_t fpscr;
+        __asm__ volatile("vmrs %0, fpscr" : "=r"(fpscr));
+        volatile double third = 1.0 / 3.0, tenth = 0.1;
+        logInfo("FPU: FPSCR was %08lx, now %08lx (round to nearest); 1/3*3 %s 1, 0.1+0.2 %s 0.3 as on a PC\n",
+            (unsigned long) startFpscr, (unsigned long) fpscr, third * 3.0 == 1.0 ? "==" : "!=",
+            tenth + 0.2 == 0.3 ? "==" : "!=");
+    }
     N3DS_logMemory("startup");
 
     bool citroReady = false;

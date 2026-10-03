@@ -21,3 +21,5 @@ void N3DSPause_init(Runner* runner, Renderer* renderer);
 // screen, routes the game's screen) and turns this frame's touch into presses. Returns whether the game is paused.
 bool N3DSPause_update(void);
 bool N3DSPause_isPaused(void);
+// Whether the bottom screen should show the pause screen's map page as it last was (during play).
+bool N3DSPause_showMapOnBottom(void);

@@ -17,6 +17,8 @@ int32_t N3DSGml_roomIndex(const char* name);
 
 // First active, live instance of an object (by index), NULL if none.
 Instance* N3DSGml_firstInstance(int32_t objectIndex);
+// First live instance of an object, active or not, NULL if none.
+Instance* N3DSGml_anyInstance(int32_t objectIndex);
 // Fills out[] with up to max active, live instances of an object; returns how many.
 int32_t N3DSGml_instances(int32_t objectIndex, Instance** out, int32_t max);
 

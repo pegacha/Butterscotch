@@ -42,6 +42,15 @@ int32_t N3DSGml_instances(int32_t objectIndex, Instance** out, int32_t max) {
     return n;
 }
 
+Instance* N3DSGml_anyInstance(int32_t objectIndex) {
+    if (gRunner == NULL || objectIndex < 0) return NULL;
+    for (ptrdiff_t i = 0; i < arrlen(gRunner->instances); i++) {
+        Instance* inst = gRunner->instances[i];
+        if (inst != NULL && !inst->destroyed && inst->objectIndex == objectIndex) return inst;
+    }
+    return NULL;
+}
+
 Instance* N3DSGml_firstInstance(int32_t objectIndex) {
     Instance* inst = NULL;
     return N3DSGml_instances(objectIndex, &inst, 1) == 1 ? inst : NULL;

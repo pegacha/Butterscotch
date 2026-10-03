@@ -42,6 +42,11 @@ foreach(_opt ENABLE_VM_GML_PROFILER ENABLE_VM_TRACING ENABLE_VM_OPCODE_PROFILER 
     endif()
 endforeach()
 
+option(N3DS_POISON_MALLOC "Fill new heap memory with a pattern, like reused memory on hardware (debug)" OFF)
+if(N3DS_POISON_MALLOC)
+    target_compile_definitions(butterscotch PRIVATE N3DS_POISON_MALLOC)
+    target_link_options(butterscotch PRIVATE -Wl,--wrap=malloc -Wl,--wrap=realloc)
+endif()
 option(N3DS_DIAG_PATTERN "Draw renderer test squares (debug)" OFF)
 if(N3DS_DIAG_PATTERN)
     target_compile_definitions(butterscotch PRIVATE N3DS_DIAG_PATTERN)

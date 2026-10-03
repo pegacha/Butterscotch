@@ -357,6 +357,10 @@ typedef struct {
     C3D_Tex frozenTop;
     Tex3DS_SubTexture frozenTopSubtex;
     bool frozenTopValid;
+    // The pause screen as last seen on its map page, shown on the bottom screen during play.
+    C3D_Tex bottomShot;
+    Tex3DS_SubTexture bottomShotSubtex;
+    bool bottomShotValid;
     C3D_RenderTarget* topTarget;
     C3D_RenderTarget* bottomTarget;
     N3DSLoadedAtlasPage* atlasPages;
@@ -5420,33 +5424,48 @@ static inline uint32_t N3DSRenderer_morton(uint32_t x, uint32_t y) {
 // Copies the top screen's color buffer (the last finished frame: call right after C3D_FrameBegin, before anything
 // clears it) into a texture. The color buffer is the screen rotated 90 degrees in 8x8 Morton tiles; textures are
 // 8x8 Morton tiles, first row at the top.
-bool N3DSRenderer_captureFrozenTop(Renderer* base) {
-    N3DSRenderer* renderer = (N3DSRenderer*) base;
-    C3D_RenderTarget* target = renderer->topTarget;
+// Copies a screen's finished color buffer (w x h on screen) into a texture (allocated on first use).
+static bool N3DSRenderer_copyScreen(C3D_RenderTarget* target, uint32_t w, uint32_t h, C3D_Tex* tex, Tex3DS_SubTexture* subtex) {
     if (target == NULL || target->frameBuf.colorBuf == NULL) return false;
-    if (renderer->frozenTop.data == NULL && !C3D_TexInit(&renderer->frozenTop, N3DS_FROZEN_TEX_W, N3DS_FROZEN_TEX_H, GPU_RGBA8)) return false;
-    const uint32_t fbW = target->frameBuf.width; // 240
+    if (tex->data == NULL && !C3D_TexInit(tex, N3DS_FROZEN_TEX_W, N3DS_FROZEN_TEX_H, GPU_RGBA8)) return false;
+    const uint32_t fbW = target->frameBuf.width; // 240: the screens are rotated
     const uint32_t* src = (const uint32_t*) target->frameBuf.colorBuf;
-    uint32_t* dst = (uint32_t*) renderer->frozenTop.data;
-    for (uint32_t y = 0; y < N3DS_TOP_HEIGHT; y++) {
+    uint32_t* dst = (uint32_t*) tex->data;
+    for (uint32_t y = 0; y < h; y++) {
         uint32_t fx = (fbW - 1u) - y;
-        uint32_t ty = y;
-        for (uint32_t x = 0; x < N3DS_TOP_WIDTH; x++) {
+        for (uint32_t x = 0; x < w; x++) {
             uint32_t fy = x;
             uint32_t p = src[((fy >> 3) * (fbW >> 3) + (fx >> 3)) * 64u + N3DSRenderer_morton(fx & 7u, fy & 7u)];
-            dst[((ty >> 3) * (N3DS_FROZEN_TEX_W >> 3) + (x >> 3)) * 64u + N3DSRenderer_morton(x & 7u, ty & 7u)] = p | 0xFFu;
+            dst[((y >> 3) * (N3DS_FROZEN_TEX_W >> 3) + (x >> 3)) * 64u + N3DSRenderer_morton(x & 7u, y & 7u)] = p | 0xFFu;
         }
     }
-    GSPGPU_FlushDataCache(renderer->frozenTop.data, renderer->frozenTop.size);
-    C3D_TexSetFilter(&renderer->frozenTop, GPU_NEAREST, GPU_NEAREST);
-    renderer->frozenTopSubtex = (Tex3DS_SubTexture) {
-        .width = N3DS_TOP_WIDTH, .height = N3DS_TOP_HEIGHT,
+    GSPGPU_FlushDataCache(tex->data, tex->size);
+    C3D_TexSetFilter(tex, GPU_NEAREST, GPU_NEAREST);
+    *subtex = (Tex3DS_SubTexture) {
+        .width = (u16) w, .height = (u16) h,
         .left = 0.0f, .top = 1.0f,
-        .right = (float) N3DS_TOP_WIDTH / (float) N3DS_FROZEN_TEX_W,
-        .bottom = 1.0f - (float) N3DS_TOP_HEIGHT / (float) N3DS_FROZEN_TEX_H,
+        .right = (float) w / (float) N3DS_FROZEN_TEX_W,
+        .bottom = 1.0f - (float) h / (float) N3DS_FROZEN_TEX_H,
     };
-    renderer->frozenTopValid = true;
     return true;
+}
+
+bool N3DSRenderer_captureFrozenTop(Renderer* base) {
+    N3DSRenderer* renderer = (N3DSRenderer*) base;
+    renderer->frozenTopValid = N3DSRenderer_copyScreen(renderer->topTarget, N3DS_TOP_WIDTH, N3DS_TOP_HEIGHT, &renderer->frozenTop, &renderer->frozenTopSubtex);
+    return renderer->frozenTopValid;
+}
+
+bool N3DSRenderer_captureBottomSnapshot(Renderer* base) {
+    N3DSRenderer* renderer = (N3DSRenderer*) base;
+    if (N3DSRenderer_copyScreen(renderer->bottomTarget, N3DS_BOTTOM_WIDTH, N3DS_BOTTOM_HEIGHT, &renderer->bottomShot, &renderer->bottomShotSubtex)) {
+        renderer->bottomShotValid = true;
+    }
+    return renderer->bottomShotValid;
+}
+
+bool N3DSRenderer_hasBottomSnapshot(Renderer* base) {
+    return ((N3DSRenderer*) base)->bottomShotValid;
 }
 
 // Frees the frozen frame (call at the start of a frame: the GPU is done with it).
@@ -5475,6 +5494,16 @@ void N3DSRenderer_endScreenOverlay(Renderer* base) {
     N3DSRenderer_applyAlphaState(renderer);
     // The game's next bind starts from a known state.
     renderer->activeSceneTarget = N3DS_SCENE_TARGET_NONE;
+}
+
+void N3DSRenderer_drawBottomSnapshot(Renderer* base) {
+    N3DSRenderer* renderer = (N3DSRenderer*) base;
+    if (!renderer->bottomShotValid) return;
+    N3DSRenderer_beginScreenOverlay(base, false);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    C2D_Image image = { .tex = &renderer->bottomShot, .subtex = &renderer->bottomShotSubtex };
+    C2D_DrawImageAt(image, 0.0f, 0.0f, 0.5f, NULL, 1.0f, 1.0f);
+    N3DSRenderer_endScreenOverlay(base);
 }
 
 void N3DSRenderer_drawFrozenTop(Renderer* base) {

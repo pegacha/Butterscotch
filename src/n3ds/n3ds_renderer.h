@@ -56,6 +56,10 @@ void N3DSRenderer_setHostScreenBottom(Renderer* renderer, bool bottom);
 bool N3DSRenderer_captureFrozenTop(Renderer* renderer);
 void N3DSRenderer_drawFrozenTop(Renderer* renderer);
 void N3DSRenderer_dropFrozenTop(Renderer* renderer);
+// Keeps the finished bottom screen (the pause screen; call right after C3D_FrameBegin) / shows it.
+bool N3DSRenderer_captureBottomSnapshot(Renderer* renderer);
+bool N3DSRenderer_hasBottomSnapshot(Renderer* renderer);
+void N3DSRenderer_drawBottomSnapshot(Renderer* renderer);
 // Plain citro2d drawing in screen pixels on top of the game's frame (top or bottom screen).
 #define N3DS_OVERLAY_DEPTH 1.0f
 void N3DSRenderer_beginScreenOverlay(Renderer* renderer, bool top);

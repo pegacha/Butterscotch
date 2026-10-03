@@ -1,0 +1,17 @@
+# Bottom screen during play: monitor off, tap to pause, map page captured, resume, map shown during play.
+after_room titleroom
+press 800 START 4
+press 900 START 4
+press 1000 A 4
+press 1100 A 4
+after_room rm_a0h01
+press 200 START 6
+press 200 SELECT 6
+screenshot 300
+touch 420 160 120 3
+screenshot 560
+press 640 START 4
+screenshot 760
+press 780 RIGHT 120
+screenshot 900
+exit 920

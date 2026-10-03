@@ -27,6 +27,9 @@
 // Touch here: tap a row to select it, tap the selected row to activate it (touch and hold the left/right half of
 // its value box to turn the value down/up); the hint strip at the bottom (which shows the Menu2 hint) is Menu2; drag the map to pan it and
 // tap a cell to put the marker there (tap the marker to delete it); drag a log list or an expanded log to scroll.
+// During play the bottom screen shows the pause screen's map page as it last was (AM2R runs one room at a time,
+// so it can't be live): it is captured while the pause screen is on its map page, and a tap on the bottom screen
+// pauses the game (the pause screen opens on the map).
 // Note: AM2R has a debug leftover that moves Samus to the mouse while mouse button 1 is held, so touch must never
 // become a mouse.
 
@@ -38,6 +41,9 @@
 #define N3DS_PAUSE_SCROLL_STEP 12
 // A frame captured on a Start press is the paused game if the pause screen opens within this many frames.
 #define N3DS_PAUSE_CAPTURE_FRAMES 30
+// The map page is copied once the pause screen has faded in, then again every so often while it stays up.
+#define N3DS_PAUSE_MAP_SETTLE_FRAMES 30
+#define N3DS_PAUSE_MAP_REFRESH_FRAMES 60
 
 enum { BTN_UP = 12, BTN_DOWN = 13, BTN_LEFT = 14, BTN_RIGHT = 15 };
 enum { BTN_MENU1 = -1, BTN_MENU2 = -2 }; // resolved from the game's own bindings when pressed
@@ -73,6 +79,11 @@ static struct {
     N3DSPauseStep steps[N3DS_PAUSE_MAX_STEPS];
     int32_t stepCount, stepHead, cooldown;
     uint32_t frame, captureFrame; // captureFrame 0 = nothing held
+    uint32_t subscreenFrames, mapShotFrame;
+    bool inGame;
+    bool waitRelease; // a touch that was down when the game paused or resumed counts for neither
+    int32_t objCharacter;
+    uint32_t samusMissingFrames;
 } gPause;
 
 void N3DSPause_init(Runner* runner, Renderer* renderer) {
@@ -90,6 +101,7 @@ void N3DSPause_init(Runner* runner, Renderer* renderer) {
     gPause.objSubscreenMenu = N3DSGml_objectIndex("oSubscreenMenu");
     gPause.objLogScreenControl = N3DSGml_objectIndex("oLogScreenControl");
     gPause.objLogEntry = N3DSGml_objectIndex("oLogEntry");
+    gPause.objCharacter = N3DSGml_objectIndex("oCharacter");
     static const char* rowNames[6] = { "oPauseOption", "oNormalOption", "oNormalOptionR", "oNormalOptionC", "oOptionLR", "oOptionSlider" };
     static const N3DSRowAlign rowAligns[6] = { ROW_LEFT, ROW_LEFT, ROW_RIGHT, ROW_CENTRE, ROW_VALUE, ROW_VALUE };
     for (int i = 0; i < 6; i++) {
@@ -409,6 +421,10 @@ static void N3DSPause_drag(int32_t dx, int32_t dy) {
 static void N3DSPause_handleTouch(void) {
     int32_t x, y;
     bool held = N3DSInput_touch(&x, &y);
+    if (gPause.waitRelease) {
+        gPause.waitRelease = held;
+        return;
+    }
     if (held && !gPause.touchDown) {
         gPause.touchDown = true;
         gPause.dragging = false;
@@ -463,9 +479,87 @@ static bool N3DSPause_inPauseRoom(void) {
     return N3DSGml_getGlobal("targetroom", -1, &target) && (int32_t) target == gPause.roomSubscreen;
 }
 
+static int32_t N3DSPause_page(void);
+
+// During play: a tap on the bottom screen pauses (Start, through the game's own binding).
+static void N3DSPause_handlePlayTouch(void) {
+    int32_t x, y;
+    bool held = N3DSInput_touch(&x, &y);
+    if (gPause.waitRelease) {
+        gPause.waitRelease = held;
+        gPause.touchDown = held;
+        return;
+    }
+    bool pressed = held && !gPause.touchDown;
+    gPause.touchDown = held;
+    if (!pressed) return;
+    double binding = 0.0;
+    if (!N3DSGml_getGlobal("opxjoybtn_str", -1, &binding)) return;
+    // The top screen still shows play: keep it for the paused top screen.
+    if (N3DSRenderer_captureFrozenTop(gPause.renderer)) gPause.captureFrame = gPause.frame;
+    N3DSInput_injectButton(gPause.runner, (int32_t) binding - 32769);
+}
+
+// While the pause screen sits on its map page: copy it for the bottom screen during play.
+static void N3DSPause_followMapPage(void) {
+    if (gPause.runner->currentRoomIndex != gPause.roomSubscreen) {
+        gPause.subscreenFrames = 0;
+        return;
+    }
+    gPause.subscreenFrames++;
+    if (gPause.subscreenFrames < N3DS_PAUSE_MAP_SETTLE_FRAMES || N3DSPause_page() != 0) return;
+    if (gPause.mapShotFrame != 0 && gPause.frame - gPause.mapShotFrame < N3DS_PAUSE_MAP_REFRESH_FRAMES) return;
+    // Right after C3D_FrameBegin the bottom screen still holds the last finished frame of the map page.
+    if (N3DSRenderer_captureBottomSnapshot(gPause.renderer)) gPause.mapShotFrame = gPause.frame;
+}
+
+// Hardware reports: Samus sometimes vanishes on a room change (the view stays, the game keeps running). Logs how it
+// looks from here when her instance is gone, inactive or parked off the room for more than half a second of play.
+#define N3DS_SAMUS_MISSING_FRAMES 30
+
+static void N3DSPause_watchSamus(void) {
+    Runner* runner = gPause.runner;
+    if (gPause.objCharacter < 0 || runner->currentRoom == NULL || runner->currentRoomIndex == gPause.roomTransition) return;
+    Instance* samus = N3DSGml_anyInstance(gPause.objCharacter);
+    bool missing = samus == NULL || !samus->active || !samus->visible || samus->x < 0.0f || samus->y < 0.0f ||
+        samus->x > (float) runner->currentRoom->width || samus->y > (float) runner->currentRoom->height;
+    if (!missing) {
+        if (gPause.samusMissingFrames > N3DS_SAMUS_MISSING_FRAMES) {
+            logInfo("Samus watch: back after %lu frames\n", (unsigned long) gPause.samusMissingFrames);
+        }
+        gPause.samusMissingFrames = 0;
+        return;
+    }
+    if (++gPause.samusMissingFrames != N3DS_SAMUS_MISSING_FRAMES + 1) return;
+    float vx, vy;
+    N3DSGml_viewOrigin(&vx, &vy);
+    double target = -1.0, transition = -1.0, deactivate = -1.0, tx = 0.0, ty = 0.0;
+    N3DSGml_getGlobal("targetroom", -1, &target);
+    N3DSGml_getGlobal("transitiontype", -1, &transition);
+    N3DSGml_getGlobal("objdeactivate", -1, &deactivate);
+    N3DSGml_getGlobal("transitionx", -1, &tx);
+    N3DSGml_getGlobal("transitiony", -1, &ty);
+    if (samus == NULL) {
+        logInfo("Samus watch: no oCharacter in %s (frame %d); targetroom %.0f transitiontype %.0f view %.0f,%.0f\n",
+            runner->currentRoom->name, (int) runner->frameCount, target, transition, vx, vy);
+        return;
+    }
+    logInfo("Samus watch: %s at %.1f,%.1f active %d visible %d in %s (%dx%d, frame %d); view %.0f,%.0f; targetroom %.0f "
+            "transitiontype %.0f transition %.0f,%.0f objdeactivate %.0f\n",
+        samus->x < 0.0f || samus->y < 0.0f ? "off the room" : "missing", samus->x, samus->y, (int) samus->active,
+        (int) samus->visible, runner->currentRoom->name, (int) runner->currentRoom->width, (int) runner->currentRoom->height,
+        (int) runner->frameCount, vx, vy, target, transition, tx, ty, deactivate);
+}
+
+bool N3DSPause_showMapOnBottom(void) {
+    return gPause.inGame && !gPause.paused && N3DSRenderer_hasBottomSnapshot(gPause.renderer);
+}
+
 bool N3DSPause_update(void) {
     bool paused = N3DSPause_inPauseRoom();
     gPause.frame++;
+    double inGame = 0.0;
+    gPause.inGame = gPause.roomSubscreen >= 0 && N3DSGml_getGlobal("ingame", -1, &inGame) && inGame != 0.0;
     // AM2R blanks the screen on the frame it leaves for the pause screen, so the frame to keep is taken when Start
     // goes into the input delay line (the game sees it a few frames later): the top screen still shows play.
     if (!paused && N3DSInput_startComing() && N3DSRenderer_captureFrozenTop(gPause.renderer)) gPause.captureFrame = gPause.frame;
@@ -484,9 +578,23 @@ bool N3DSPause_update(void) {
         N3DSPause_clearSteps();
         logInfo("Pause: back to the game\n");
     }
+    if (paused != gPause.paused) {
+        int32_t tx, ty;
+        gPause.waitRelease = N3DSInput_touch(&tx, &ty);
+    }
+    if (paused && !gPause.paused) gPause.mapShotFrame = 0;
     gPause.paused = paused;
     N3DSRenderer_setHostScreenBottom(gPause.renderer, paused);
-    if (!paused) return false;
+    if (!paused) {
+        if (gPause.inGame) {
+            N3DSPause_handlePlayTouch();
+            N3DSPause_watchSamus();
+        } else {
+            gPause.samusMissingFrames = 0;
+        }
+        return false;
+    }
+    N3DSPause_followMapPage();
     if (gPause.runner->currentRoomIndex == gPause.roomSubscreen) {
         N3DSPause_handleTouch();
         N3DSPause_runSteps();

@@ -754,6 +754,7 @@ int main(int argc, char** argv) {
         if (runner->frameCount % 300 == 5) N3DSRenderer_logDiag(renderer);
 #endif
         if (paused) N3DSRenderer_drawFrozenTop(renderer);
+        if (N3DSPause_showMapOnBottom()) N3DSRenderer_drawBottomSnapshot(renderer);
         if (debugMonitorVisible) N3DSDebugMonitor_draw(&debugMonitor, runner, renderer, paused);
         N3DSSavingIndicator_draw(&savingIndicator, renderer, N3DSCachedFileSystem_isSaving(fileSystem));
         renderer->vtable->flush(renderer);

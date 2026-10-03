@@ -15,6 +15,7 @@
 #include "n3ds_audio_system.h"
 #include "n3ds_cached_file_system.h"
 #include "n3ds_input.h"
+#include "n3ds_pause.h"
 #include "n3ds_platform_config.h"
 #include "n3ds_prof.h"
 #include "n3ds_renderer.h"
@@ -145,7 +146,8 @@ static void N3DSDebugMonitor_tickFrame(N3DSDebugMonitor* monitor, const double* 
     monitor->sampleStartMs = nowMs;
 }
 
-static void N3DSDebugMonitor_draw(N3DSDebugMonitor* monitor, Runner* runner, Renderer* renderer) {
+// On the bottom screen, or on the top one while the bottom one shows the game's pause screen.
+static void N3DSDebugMonitor_draw(N3DSDebugMonitor* monitor, Runner* runner, Renderer* renderer, bool onTop) {
 #ifdef N3DS_DISABLE_BOTTOM_SCREEN
     (void) monitor;
     (void) runner;
@@ -182,15 +184,15 @@ static void N3DSDebugMonitor_draw(N3DSDebugMonitor* monitor, Runner* runner, Ren
     snprintf(unimplLine, sizeof(unimplLine), "UNIMPL %lu", (unsigned long) N3DS_unimplCount());
     snprintf(roomLine, sizeof(roomLine), "R %.28s", roomName);
 
-    N3DSRenderer_beginBottomScreenGUI(renderer, 320, 240);
-    const float boxX = 92.0f;
+    N3DSRenderer_beginScreenOverlay(renderer, onTop);
+    const float boxX = onTop ? 172.0f : 92.0f;
     const float boxY = 8.0f;
     const float boxW = 220.0f;
     const float boxH = 127.0f;
     const float textX = boxX + 7.0f;
-    C2D_DrawRectSolid(boxX, boxY, 0.0f, boxW, boxH, C2D_Color32(8, 10, 16, 218));
-    C2D_DrawRectSolid(boxX, boxY, 0.0f, boxW, 2.0f, C2D_Color32(77, 118, 255, 245));
-    C2D_DrawRectSolid(boxX, boxY + boxH - 1.0f, 0.0f, boxW, 1.0f, C2D_Color32(32, 46, 78, 230));
+    C2D_DrawRectSolid(boxX, boxY, N3DS_OVERLAY_DEPTH, boxW, boxH, C2D_Color32(8, 10, 16, 218));
+    C2D_DrawRectSolid(boxX, boxY, N3DS_OVERLAY_DEPTH, boxW, 2.0f, C2D_Color32(77, 118, 255, 245));
+    C2D_DrawRectSolid(boxX, boxY + boxH - 1.0f, N3DS_OVERLAY_DEPTH, boxW, 1.0f, C2D_Color32(32, 46, 78, 230));
     // System-font text, one quad per character (the old per-pixel bitmap font cost ~2000 quads a frame, half of
     // citro2d's per-frame object budget).
     const char* lines[N3DS_MONITOR_LINES] = { "DBG", fpsLine, timeLine, sliceLine, vramLine, ramLine, unimplLine, roomLine };
@@ -215,9 +217,55 @@ static void N3DSDebugMonitor_draw(N3DSDebugMonitor* monitor, Runner* runner, Ren
         monitor->laidOut = true;
     }
     repeat(N3DS_MONITOR_LINES, i) {
-        C2D_DrawText(&monitor->texts[i], C2D_WithColor, xs[i], boxY + ys[i], 0.0f, 0.42f, 0.42f, colors[i]);
+        C2D_DrawText(&monitor->texts[i], C2D_WithColor, xs[i], boxY + ys[i], N3DS_OVERLAY_DEPTH, 0.42f, 0.42f, colors[i]);
     }
-    N3DSRenderer_endBottomScreenGUI(renderer);
+    N3DSRenderer_endScreenOverlay(renderer);
+}
+
+// "Saving..." in the top screen's bottom-right corner while the game's files have changes not yet on the SD card
+// (the second they are left to settle, then the write), held a little longer so it never just flickers.
+#define N3DS_SAVING_HOLD_MS 600u
+
+typedef struct {
+    C2D_TextBuf buf;
+    C2D_Text text;
+    u64 visibleUntilMs;
+} N3DSSavingIndicator;
+
+static void N3DSSavingIndicator_draw(N3DSSavingIndicator* indicator, Renderer* renderer, bool saving) {
+    u64 nowMs = osGetTime();
+    if (saving) indicator->visibleUntilMs = nowMs + N3DS_SAVING_HOLD_MS;
+    if (nowMs >= indicator->visibleUntilMs) return;
+    if (indicator->buf == NULL) {
+        indicator->buf = C2D_TextBufNew(32);
+        C2D_TextParse(&indicator->text, indicator->buf, "Saving...");
+        C2D_TextOptimize(&indicator->text);
+    }
+    const float scale = 0.4f;
+    float w = 0.0f, h = 0.0f;
+    C2D_TextGetDimensions(&indicator->text, scale, scale, &w, &h);
+    float x = (float) N3DS_TOP_SCREEN_W - w - 6.0f, y = (float) N3DS_TOP_SCREEN_H - h - 4.0f;
+    N3DSRenderer_beginScreenOverlay(renderer, true);
+    C2D_DrawText(&indicator->text, C2D_WithColor, x + 1.0f, y + 1.0f, N3DS_OVERLAY_DEPTH, scale, scale, C2D_Color32(0, 0, 0, 160));
+    C2D_DrawText(&indicator->text, C2D_WithColor, x, y, N3DS_OVERLAY_DEPTH, scale, scale, C2D_Color32(255, 255, 255, 210));
+    N3DSRenderer_endScreenOverlay(renderer);
+}
+
+// The VM calls a builtin over a game script of the same name, for GameMaker 2.3+ games that carry compatibility
+// scripts for newer builtins. A game made before 2.3 can't be doing that: its script is the real thing (AM2R's
+// string_split(str, sep, index) returns one part; the GMS2 builtin returns an array, and every button hint in the
+// pause screen read "<array...>").
+static void N3DS_preferGameScripts(VMContext* vm, DataWin* dataWin) {
+    if (DataWin_isVersionAtLeast(dataWin, 2, 3, 0, 0)) return;
+    for (uint32_t i = 0; i < vm->funcCallCacheCount; i++) {
+        if (vm->funcCallCache[i].builtin == NULL) continue;
+        const char* name = dataWin->func.functions[i].name;
+        ptrdiff_t script = shgeti(vm->codeIndexByName, (char*) name);
+        if (script < 0) continue;
+        vm->funcCallCache[i].builtin = NULL;
+        vm->funcCallCache[i].scriptCodeIndex = vm->codeIndexByName[script].value;
+        logInfo("VM: calls to %s go to the game's own script\n", name);
+    }
 }
 
 static char* chooseDataWinPath(void) {
@@ -539,6 +587,7 @@ int main(int argc, char** argv) {
     // Deleting a screen target unlinks that screen: the loading screen's target must go before the renderer makes its own.
     N3DSLoadingScreen_free(&loadingScreen);
     VMContext* vm = VM_create(dataWin);
+    N3DS_preferGameScripts(vm, dataWin);
     Renderer* renderer = N3DSRenderer_create();
     // Input playback runs use a fixed seed, like the desktop runner with --seed 1, so both sides stay in step.
     bool deterministic = fileExists(N3DS_SD_DIR "inputs.json");
@@ -570,6 +619,9 @@ int main(int argc, char** argv) {
     arrput(gameArgs, safeStrdup(argc > 0 && argv[0] != NULL ? argv[0] : "butterscotch"));
     Runner_setGameArgs(runner, gameArgs, (int32_t) arrlen(gameArgs));
     N3DSInput_init(runner);
+    N3DSPause_init(runner, renderer);
+    logInfo("Screen mode: %s\n", N3DS_screenModeName(gScreenMode));
+    N3DSSavingIndicator savingIndicator = {0};
 #ifdef ENABLE_VM_GML_PROFILER
     Profiler_setEnabled(&vm->profiler, true);
 #endif
@@ -615,15 +667,16 @@ int main(int argc, char** argv) {
         RunnerKeyboard_beginFrame(runner->keyboard);
         RunnerGamepad_beginFrame(runner->gamepads);
         RunnerMouse_beginFrame(runner->mouse);
-        u32 down = N3DSInput_update(runner);
+        N3DSInput_update(runner);
         InputRecording_processFrame(inputPlayback, runner->keyboard, inputFrame++);
-        if ((down & KEY_START) && (hidKeysHeld() & KEY_SELECT)) break;
-        if ((down & KEY_SELECT) && (hidKeysHeld() & KEY_L)) debugMonitorVisible = !debugMonitorVisible;
+        if (N3DSInput_takeMonitorToggle()) debugMonitorVisible = !debugMonitorVisible;
 
         u64 waitStartTick = svcGetSystemTick();
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
         double waitMs = (double) (svcGetSystemTick() - waitStartTick) * 1000.0 / (double) SYSCLOCK_ARM11;
         N3DSScreenshot_captureIfRequested(renderer);
+        // Before the step: freezes the top screen when the pause screen opens and turns touches into its presses.
+        bool paused = N3DSPause_update();
         u64 stepStartTick = svcGetSystemTick();
         Runner_step(runner);
 #ifdef ENABLE_VM_GML_PROFILER
@@ -670,13 +723,9 @@ int main(int argc, char** argv) {
         int32_t gameW = runner->applicationWidth;
         int32_t gameH = runner->applicationHeight;
 
-        // Screen mode (a tap on the touch screen cycles; the game doesn't use touch). Wide: upstream's widescreen
-        // hack (views grow to the 5:3 top screen, 1:1 pixels). Stretch: the native size scaled to 400x240.
-        // Pillarbox: native size 1:1, centred.
-        if (down & KEY_TOUCH) {
-            gScreenMode = (N3DSScreenMode) ((gScreenMode + 1) % N3DS_SCREEN_MODE_COUNT);
-            logInfo("Screen mode: %s\n", N3DS_screenModeName(gScreenMode));
-        }
+        // Screen mode (N3DS_DEFAULT_SCREEN_MODE; the touch screen belongs to the pause screen). Wide: upstream's
+        // widescreen hack (views grow to the 5:3 top screen, 1:1 pixels). Stretch: the native size scaled to
+        // 400x240. Pillarbox: native size 1:1, centred.
         runner->widescreenExtraWidth = 0;
         runner->widescreenExtraHeight = 0;
         if (gScreenMode == N3DS_SCREEN_WIDE && runner->usingAppSurface && gameW > 0 && gameH > 0) {
@@ -704,7 +753,9 @@ int main(int argc, char** argv) {
 #ifdef N3DS_DIAG_PATTERN
         if (runner->frameCount % 300 == 5) N3DSRenderer_logDiag(renderer);
 #endif
-        if (debugMonitorVisible) N3DSDebugMonitor_draw(&debugMonitor, runner, renderer);
+        if (paused) N3DSRenderer_drawFrozenTop(renderer);
+        if (debugMonitorVisible) N3DSDebugMonitor_draw(&debugMonitor, runner, renderer, paused);
+        N3DSSavingIndicator_draw(&savingIndicator, renderer, N3DSCachedFileSystem_isSaving(fileSystem));
         renderer->vtable->flush(renderer);
         Runner_handlePendingRoomChange(runner);
         renderer->vtable->flush(renderer);

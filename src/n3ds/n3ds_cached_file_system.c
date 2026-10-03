@@ -1,8 +1,10 @@
 #include "n3ds_cached_file_system.h"
 
+#include "../log.h"
 #include "../utils.h"
 #include "n3ds_prof.h"
 
+#include <3ds.h>
 #include <ctype.h>
 #include <stb/ds/stb_ds.h>
 #include <stdlib.h>
@@ -14,7 +16,8 @@
 //  - Files the game reads or writes are held in memory and written back once they have been left alone for a
 //    second (N3DSCachedFileSystem_flush), and only if they differ from what the card holds. AM2R decrypts its save
 //    in place, reads it, and encrypts it again (a 236 KB file written twice per save read, and the save-select
-//    screen reads every slot); held in memory that is no SD write at all.
+//    screen reads every slot); held in memory that is no SD write at all. The write itself happens on a worker thread
+//    (a 236 KB save is a visible hitch on the card), from a snapshot, so the game can keep changing the file.
 //  - Binary files (file_bin_*) are memory buffers between open and close: AM2R's crypt script works a byte at a
 //    time with a seek per byte, and through stdio each seek dropped the buffer and went to the card.
 // This file system is the only thing writing to the game folder while the game runs.
@@ -41,6 +44,7 @@ typedef struct {
     bool diskExists;
     u64 changedMs;
     u64 dirtySinceMs;
+    bool writing;     // a snapshot is with the writer thread
 } N3DSFileEntry;
 
 typedef struct {
@@ -48,12 +52,31 @@ typedef struct {
     N3DSFileEntry value;
 } N3DSFileMapEntry;
 
+// A file for the writer thread: a snapshot of the entry's contents (or a delete).
+typedef struct {
+    char* key;
+    char* path;
+    uint8_t* data;
+    int32_t size;
+    bool exists;
+    bool ok;
+} N3DSWriteJob;
+
 typedef struct {
     FileSystem base;
     FileSystem* inner;
     N3DSExistsEntry* files;
     N3DSExistsEntry* dirs;
     N3DSFileMapEntry* contents;
+    Thread writer;
+    bool writerRunning;
+    LightLock lock;
+    LightEvent wake;
+    CondVar idle;
+    N3DSWriteJob* queue; // stb_ds arrays, under lock
+    N3DSWriteJob* done;
+    bool busy;
+    bool stop;
 } N3DSCachedFileSystem;
 
 #define INNER(fs) (((N3DSCachedFileSystem*) (fs))->inner)
@@ -155,14 +178,133 @@ static void writeBack(N3DSCachedFileSystem* c, N3DSFileEntry* e) {
     e->diskExists = e->exists;
 }
 
+// ===[ Writer thread ]===
+
+#define N3DS_FS_WRITER_STACK_SIZE (16u * 1024u)
+// Above the main thread (0x30), like the page loader: it is blocked on the card nearly all the time.
+#define N3DS_FS_WRITER_PRIORITY 0x2F
+
+static void writerMain(void* arg) {
+    N3DSCachedFileSystem* c = arg;
+    while (true) {
+        LightEvent_Wait(&c->wake);
+        while (true) {
+            LightLock_Lock(&c->lock);
+            if (arrlen(c->queue) == 0) {
+                c->busy = false;
+                CondVar_Broadcast(&c->idle);
+                bool stop = c->stop;
+                LightLock_Unlock(&c->lock);
+                if (stop) return;
+                break;
+            }
+            N3DSWriteJob job = c->queue[0];
+            arrdel(c->queue, 0);
+            c->busy = true;
+            LightLock_Unlock(&c->lock);
+
+            if (job.exists) {
+                job.ok = c->inner->vtable->writeFileBinary(c->inner, job.path, job.data != NULL ? job.data : (const uint8_t*) "", job.size);
+            } else {
+                job.ok = c->inner->vtable->deleteFile(c->inner, job.path);
+            }
+
+            LightLock_Lock(&c->lock);
+            arrput(c->done, job);
+            LightLock_Unlock(&c->lock);
+        }
+    }
+}
+
+static void startWriter(N3DSCachedFileSystem* c) {
+    LightLock_Init(&c->lock);
+    LightEvent_Init(&c->wake, RESET_ONESHOT);
+    CondVar_Init(&c->idle);
+    // The New 3DS's extra core, else the system core; it only ever waits on the card.
+    c->writer = threadCreate(writerMain, c, N3DS_FS_WRITER_STACK_SIZE, N3DS_FS_WRITER_PRIORITY, 2, false);
+    if (c->writer == NULL) c->writer = threadCreate(writerMain, c, N3DS_FS_WRITER_STACK_SIZE, N3DS_FS_WRITER_PRIORITY, 1, false);
+    c->writerRunning = c->writer != NULL;
+}
+
+// Takes the writer's finished jobs: what the card now holds (main thread).
+static void adoptFinishedWrites(N3DSCachedFileSystem* c) {
+    if (!c->writerRunning) return;
+    LightLock_Lock(&c->lock);
+    N3DSWriteJob* done = c->done;
+    c->done = NULL;
+    LightLock_Unlock(&c->lock);
+    for (ptrdiff_t j = 0; j < arrlen(done); j++) {
+        N3DSWriteJob* job = &done[j];
+        ptrdiff_t i = shgeti(c->contents, job->key);
+        N3DSFileEntry* e = i >= 0 ? &c->contents[i].value : NULL;
+        if (e != NULL) e->writing = false;
+        logInfo("%s %s (%ld bytes)\n", job->ok ? "Saved" : "Could not save", job->path, (long) job->size);
+        if (e != NULL && job->ok) {
+            if (e->disk != e->data) free(e->disk);
+            e->disk = job->data;
+            e->diskSize = job->size;
+            e->diskExists = job->exists;
+            // Unchanged since the snapshot: share it again.
+            if (e->data != e->disk && !entryDirty(e)) {
+                free(e->data);
+                e->data = e->disk;
+                e->size = e->diskSize;
+            }
+        } else {
+            free(job->data);
+        }
+        free(job->key);
+        free(job->path);
+    }
+    if (arrlen(done) > 0) invalidate(&c->base);
+    arrfree(done);
+}
+
+static void waitForWriter(N3DSCachedFileSystem* c) {
+    if (!c->writerRunning) return;
+    LightLock_Lock(&c->lock);
+    while (arrlen(c->queue) > 0 || c->busy) CondVar_Wait(&c->idle, &c->lock);
+    LightLock_Unlock(&c->lock);
+    adoptFinishedWrites(c);
+}
+
+static void queueWrite(N3DSCachedFileSystem* c, const char* key, N3DSFileEntry* e) {
+    N3DSWriteJob job = {
+        .key = safeStrdup(key),
+        .path = safeStrdup(e->path),
+        .data = e->exists ? dupBytes(e->data, e->size) : NULL,
+        .size = e->size,
+        .exists = e->exists,
+    };
+    e->writing = true;
+    LightLock_Lock(&c->lock);
+    arrput(c->queue, job);
+    c->busy = true;
+    LightLock_Unlock(&c->lock);
+    LightEvent_Signal(&c->wake);
+}
+
+bool N3DSCachedFileSystem_isSaving(FileSystem* fs) {
+    N3DSCachedFileSystem* c = (N3DSCachedFileSystem*) fs;
+    for (ptrdiff_t i = 0; i < shlen(c->contents); i++) {
+        if (c->contents[i].value.writing || entryDirty(&c->contents[i].value)) return true;
+    }
+    return false;
+}
+
 void N3DSCachedFileSystem_flush(FileSystem* fs, bool force) {
     N3DSCachedFileSystem* c = (N3DSCachedFileSystem*) fs;
+    if (force) waitForWriter(c);
+    else adoptFinishedWrites(c);
     u64 nowMs = osGetTime();
     int32_t cleanBytes = 0;
     for (ptrdiff_t i = 0; i < shlen(c->contents); i++) {
         N3DSFileEntry* e = &c->contents[i].value;
+        if (e->writing) continue;
         if (entryDirty(e)) {
-            if (force || nowMs - e->changedMs >= N3DS_FS_WRITE_BACK_DELAY_MS || nowMs - e->dirtySinceMs >= N3DS_FS_WRITE_BACK_MAX_DELAY_MS) writeBack(c, e);
+            if (!force && nowMs - e->changedMs < N3DS_FS_WRITE_BACK_DELAY_MS && nowMs - e->dirtySinceMs < N3DS_FS_WRITE_BACK_MAX_DELAY_MS) continue;
+            if (force || !c->writerRunning) writeBack(c, e);
+            else queueWrite(c, c->contents[i].key, e);
         } else {
             cleanBytes += e->size;
         }
@@ -170,7 +312,7 @@ void N3DSCachedFileSystem_flush(FileSystem* fs, bool force) {
     if (cleanBytes <= N3DS_FS_CLEAN_TOTAL_MAX_BYTES) return;
     // Too much kept for reads: drop every unchanged file (they are read again from the card when needed).
     for (ptrdiff_t i = shlen(c->contents) - 1; i >= 0; i--) {
-        if (entryDirty(&c->contents[i].value)) continue;
+        if (c->contents[i].value.writing || entryDirty(&c->contents[i].value)) continue;
         freeEntry(&c->contents[i].value);
         shdel(c->contents, c->contents[i].key);
     }
@@ -184,7 +326,7 @@ static void dropIfLargeAndClean(N3DSCachedFileSystem* c, const char* path) {
     ptrdiff_t i = shgeti(c->contents, key);
     if (i < 0) return;
     N3DSFileEntry* e = &c->contents[i].value;
-    if (entryDirty(e) || N3DS_FS_CLEAN_FILE_MAX_BYTES >= e->size) return;
+    if (e->writing || entryDirty(e) || N3DS_FS_CLEAN_FILE_MAX_BYTES >= e->size) return;
     freeEntry(e);
     shdel(c->contents, key);
 }
@@ -193,6 +335,9 @@ static void flushPath(N3DSCachedFileSystem* c, const char* path) {
     char key[512];
     normaliseKey(key, sizeof(key), path);
     ptrdiff_t i = shgeti(c->contents, key);
+    if (i < 0) return;
+    if (c->contents[i].value.writing) waitForWriter(c);
+    i = shgeti(c->contents, key);
     if (i >= 0) writeBack(c, &c->contents[i].value);
 }
 
@@ -413,12 +558,23 @@ FileSystem* N3DSCachedFileSystem_create(FileSystem* inner) {
     sh_new_strdup(c->files);
     sh_new_strdup(c->dirs);
     sh_new_strdup(c->contents);
+    startWriter(c);
     return (FileSystem*) c;
 }
 
 FileSystem* N3DSCachedFileSystem_destroy(FileSystem* fs) {
     N3DSCachedFileSystem* c = (N3DSCachedFileSystem*) fs;
     N3DSCachedFileSystem_flush(fs, true);
+    if (c->writerRunning) {
+        LightLock_Lock(&c->lock);
+        c->stop = true;
+        LightLock_Unlock(&c->lock);
+        LightEvent_Signal(&c->wake);
+        threadJoin(c->writer, U64_MAX);
+        threadFree(c->writer);
+        arrfree(c->queue);
+        arrfree(c->done);
+    }
     FileSystem* inner = c->inner;
     for (ptrdiff_t i = 0; i < shlen(c->contents); i++) freeEntry(&c->contents[i].value);
     shfree(c->contents);

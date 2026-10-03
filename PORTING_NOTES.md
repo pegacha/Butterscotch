@@ -39,14 +39,34 @@ movie via `ltm_to_inputs.py`. `-DENABLE_VM_GML_PROFILER=ON` logs a GML profile e
   area (top-left part). Over 1024 only the top-left 1024 is stored (PICA limit). AM2R's 2048x1024 pause map ends
   up as 1024x512 RGBA5551, which holds the whole map (it uses about 600x464).
 - Screen: AM2R lays out its own 320x240 (application surface and HUD at its own offsets), so the default mode
-  stretches it to 400x240; a tap on the touch screen cycles stretch / widescreen hack / 1:1 pillarbox.
+  (`N3DS_SCREEN_MODE`) stretches it to 400x240 (also: widescreen hack, 1:1 pillarbox). The touch screen belongs to
+  the pause screen.
+- Pause screen (`n3ds_pause.c`): while the game is in `rm_subscreen` (or the transition into it), the game's
+  screen (`RENDER_TARGET_HOST_FRAMEBUFFER`) is the bottom screen, 1:1, and the top screen shows the game as it was
+  when paused. That frame is captured when Start goes into the input delay line (AM2R blanks the screen on the
+  frame it leaves for the pause room). Touch becomes the presses the pause screen already understands (AM2R's own
+  Menu1/Menu2 bindings and the D-pad), plus a few variable writes:
+  - the hint strip at the bottom (it shows the Menu2 hint) is Menu2: change page / back;
+  - page cross: tap an icon;
+  - map: drag to pan (`oMapCamera.targetx/targety`), tap a cell to put the marker there, tap the marker to delete it;
+  - inventory: tap an item to select it (shows its tip), tap again to toggle it;
+  - logs: tap an entry to select it, tap again to expand; drag to scroll the list or the text;
+  - options and submenus: tap a row to select, tap again to activate; touch and hold the left/right half of a
+    selected value box to turn it down/up (the volume sliders only move while the direction is held).
+  Touch must never become a mouse: AM2R moves Samus to the mouse while button 1 is held (a debug leftover).
+- Start+Select toggles the debug monitor (on the top screen while paused). Start and Select reach the game 3 frames
+  late, press for press, so the chord is caught before the game sees either.
+- "Saving..." (small, top screen, bottom-right) while the game's files have changes not yet on the SD card.
+- Builtins vs game scripts: the VM prefers a builtin over a game script of the same name (for GMS 2.3+ games'
+  compatibility scripts). For games older than 2.3 the 3DS front end points those calls back at the game's script
+  (AM2R's `string_split(str, sep, index)`; the GMS2 builtin returns an array and every button hint read "<array>").
 - Main loop: own loop in `src/n3ds/main.c` following `loop.c`'s sequence (`loop.c` is GL/windowing specific).
   The GPU frame is opened before `Runner_step`, since GML draws to surfaces from any event. Pacing is
   `C3D_FrameRate` at the room speed only.
 - File system: upstream `OverlayFileSystem` wrapped by `N3DSCachedFileSystem`, which keeps the SD card out of the
   frame loop: existence checks cached; binary files are memory buffers between open and close; files the game
   reads or writes are held in memory and written back a second after the game stops changing them, only if they
-  differ from the card (flushed at exit too). AM2R's `crypt` script XORs its 236 KB save in place a byte at a time
+  differ from the card (flushed at exit too), by a writer thread from a snapshot. AM2R's `crypt` script XORs its 236 KB save in place a byte at a time
   with a seek per byte, and decrypts/re-encrypts on every save read: seconds per read through stdio, nothing now.
 - Input: 3DS buttons -> gamepad slot 0 by position (B = face1, A = face2, Y = face3, X = face4, L/R, ZL/ZR,
   Select, Start, D-pad, circle pad/C-stick axes) plus keyboard arrows/Enter/Escape. AM2R binds its actions in its
@@ -57,8 +77,8 @@ movie via `ltm_to_inputs.py`. `-DENABLE_VM_GML_PROFILER=ON` logs a GML profile e
   DSP-ADPCM files streamed from the SD by a worker thread on core 2.
 - Textures: the preprocessor packs atlas pages (ETC1A4/RGBA5551/LA4/L4, RGBA8 where an image has partial alpha)
   into `gfx/atlas.bin`; sprite sheets into `gfx/direct_assets.bin`; `room_manifest.bin` lists each room's pages.
-  On a room change the room's pages are queued for a background loader thread (own handle on `atlas.bin`, core 2);
-  a page needed before its turn is read or waited for on the spot.
+  On a room change the room's pages are queued for a background loader thread (own handle on `atlas.bin`, core 2,
+  priority above the main thread: below it, it starved); a page needed before its turn is read or waited for.
 - `drawTile` culls against the visible room rectangle before any lookup (the runner hands over every tile in
   the room; ~2x on AM2R's draw time).
 - Dropped Undertale-only code: borders, battle top-screen layout, sprite-name hacks, GMS2 tile-layer cache,
@@ -67,7 +87,7 @@ movie via `ltm_to_inputs.py`. `-DENABLE_VM_GML_PROFILER=ON` logs a GML profile e
 
 ## Diagnostics
 
-Bottom screen (toggle L+Select): FPS, average frame ms and the worst in the last quarter second; `S` step (GML),
+Bottom screen (top screen while paused; toggle Start+Select): FPS, average frame ms and the worst in the last quarter second; `S` step (GML),
 `W` waiting for the GPU/VBlank, `D` building the GPU frame, `P` room prewarm; `IO` SD reads by the renderer,
 `TX` texture uploads/surface allocations, `FS` the game's file I/O, `AU` audio calls (all ms per frame, main
 thread only); VRAM, heap used/total, linear free, UNIMPL count, room. `log.txt`: a `Perf:` line every 5 s, every
@@ -99,7 +119,7 @@ screens and room changes, pause screen ~7.5 fps.
 
 ## Known issues
 
-- File-select hint line shows raw placeholder strings.
 - A room change on hardware once left the game in the transition room (Samus gone, old view shown, game still
   running); not reproduced in Azahar.
+- Start/Select reach the game 3 frames (50 ms) late (Start+Select chord detection).
 - `file_text_open_append` is not an upstream builtin (AM2R's `writelog` silently writes nothing).

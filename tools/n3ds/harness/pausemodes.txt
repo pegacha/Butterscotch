@@ -1,0 +1,22 @@
+# Load slot A, pause, then visit each pause mode via the mode cross (B, then a direction).
+after_room titleroom
+press 800 START 4
+press 900 START 4
+press 1000 A 4
+press 1100 A 4
+after_room rm_a0h01
+press 420 START 4
+screenshot 560
+press 600 B 4
+screenshot 640
+press 680 RIGHT 4
+screenshot 760
+press 800 B 4
+press 840 LEFT 4
+screenshot 920
+press 960 B 4
+press 1000 DOWN 4
+screenshot 1080
+press 1120 A 4
+screenshot 1180
+exit 1200

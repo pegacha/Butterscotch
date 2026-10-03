@@ -1,0 +1,55 @@
+# Pause screen on the bottom screen, driven by touch (run_in_azahar.ps1 -Save <landing>).
+after_room titleroom
+press 800 START 4
+press 900 START 4
+press 1000 A 4
+press 1100 A 4
+after_room rm_a0h01
+# Start+Select: monitor off, then on again
+press 200 START 6
+press 200 SELECT 6
+screenshot 240
+press 280 START 6
+press 280 SELECT 6
+# pause: top frozen, map on the bottom
+press 420 START 4
+screenshot 560
+# drag the map left, tap a cell for the marker
+touch 600 200 120 20 120 120
+screenshot 640
+touch 660 220 100 2
+screenshot 700
+# hint strip -> page cross -> right (inventory)
+touch 720 160 226 2
+screenshot 750
+touch 770 250 120 2
+screenshot 830
+# tap Morph Ball (select), then Power Suit (select)
+touch 850 254 74 2
+screenshot 880
+touch 900 46 74 2
+screenshot 930
+# cross -> left (logs); tap the third entry, then again (expand)
+touch 950 160 226 2
+touch 980 70 120 2
+screenshot 1040
+touch 1060 50 105 2
+screenshot 1100
+touch 1120 50 105 2
+screenshot 1180
+# collapse, cross -> down (options); open Options (tap twice), back out (hint strip), Resume (tap twice)
+touch 1200 160 120 2
+touch 1240 160 226 2
+touch 1270 160 200 2
+screenshot 1330
+touch 1350 80 127 2
+touch 1380 80 127 2
+screenshot 1440
+touch 1460 160 226 2
+screenshot 1500
+touch 1510 160 200 2
+screenshot 1530
+touch 1560 80 95 2
+touch 1590 80 95 2
+screenshot 1660
+exit 1680

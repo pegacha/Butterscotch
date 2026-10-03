@@ -12,8 +12,9 @@
 
 #include "stb_image_write.h"
 
-// Debug/verification only: copies the finished top-screen color buffer (VRAM, 8x8 Morton tiles, RGBA8,
-// rotated 90 degrees) into a PNG. Not on the draw path.
+// Debug/verification only: copies the finished screens' color buffers (VRAM, 8x8 Morton tiles, RGBA8, rotated 90
+// degrees) into PNGs (frame_<n>.png for the top screen, frame_<n>_bottom.png for the bottom one). Not on the draw
+// path.
 
 static int32_t gRequestedFrame = -1;
 
@@ -25,12 +26,7 @@ static inline uint32_t N3DSScreenshot_morton(uint32_t x, uint32_t y) {
     return (x & 1u) | ((y & 1u) << 1) | ((x & 2u) << 1) | ((y & 2u) << 2) | ((x & 4u) << 2) | ((y & 4u) << 3);
 }
 
-void N3DSScreenshot_captureIfRequested(Renderer* renderer) {
-    if (gRequestedFrame < 0) return;
-    int32_t frame = gRequestedFrame;
-    gRequestedFrame = -1;
-
-    C3D_RenderTarget* target = N3DSRenderer_getTopTarget(renderer);
+static void N3DSScreenshot_save(C3D_RenderTarget* target, const char* path) {
     if (target == NULL || target->frameBuf.colorBuf == NULL) return;
     const uint32_t fbW = target->frameBuf.width;   // 240 (the screen is rotated)
     const uint32_t fbH = target->frameBuf.height;  // 400
@@ -52,13 +48,22 @@ void N3DSScreenshot_captureIfRequested(Renderer* renderer) {
         }
     }
 
-    mkdir(N3DS_SD_DIR "shots", 0777);
-    char path[128];
-    snprintf(path, sizeof(path), N3DS_SD_DIR "shots/frame_%05d.png", (int) frame);
     if (stbi_write_png(path, (int) outW, (int) outH, 3, rgb, (int) outW * 3)) {
         logInfo("Screenshot: %s\n", path);
     } else {
         logWarn("Screenshot: could not write %s\n", path);
     }
     free(rgb);
+}
+
+void N3DSScreenshot_captureIfRequested(Renderer* renderer) {
+    if (gRequestedFrame < 0) return;
+    int32_t frame = gRequestedFrame;
+    gRequestedFrame = -1;
+    mkdir(N3DS_SD_DIR "shots", 0777);
+    char path[128];
+    snprintf(path, sizeof(path), N3DS_SD_DIR "shots/frame_%05d.png", (int) frame);
+    N3DSScreenshot_save(N3DSRenderer_getTopTarget(renderer), path);
+    snprintf(path, sizeof(path), N3DS_SD_DIR "shots/frame_%05d_bottom.png", (int) frame);
+    N3DSScreenshot_save(N3DSRenderer_getBottomTarget(renderer), path);
 }

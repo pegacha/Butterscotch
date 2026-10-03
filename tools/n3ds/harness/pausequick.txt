@@ -1,0 +1,10 @@
+# Load slot A, pause, screenshot both screens.
+after_room titleroom
+press 800 START 4
+press 900 START 4
+press 1000 A 4
+press 1100 A 4
+after_room rm_a0h01
+press 420 START 4
+screenshot 520
+exit 540

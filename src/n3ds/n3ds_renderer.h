@@ -44,8 +44,19 @@ bool N3DSRenderer_drawCachedTileEntry(Renderer* renderer, int32_t tileEntryIndex
 // Loads the textures a room is likely to need (call when the room changes).
 void N3DSRenderer_prewarmRoom(Renderer* renderer, Runner* runner);
 C3D_RenderTarget* N3DSRenderer_getTopTarget(Renderer* renderer);
+C3D_RenderTarget* N3DSRenderer_getBottomTarget(Renderer* renderer);
 // Deletes surfaces freed during earlier frames. Call outside C3D_FrameBegin/End; all = everything (shutdown).
 void N3DSRenderer_collectGarbage(Renderer* renderer, bool all);
 void N3DSRenderer_logDiag(Renderer* renderer);
 // Stretch the game to the whole top screen (else integer scale, centred).
 void N3DSRenderer_setStretchToScreen(Renderer* renderer, bool stretch);
+// Sends the game's screen (RENDER_TARGET_HOST_FRAMEBUFFER) to the bottom screen, 1:1 (the pause screen).
+void N3DSRenderer_setHostScreenBottom(Renderer* renderer, bool bottom);
+// Keeps the last finished top-screen frame (call right after C3D_FrameBegin) / shows it / lets it go.
+bool N3DSRenderer_captureFrozenTop(Renderer* renderer);
+void N3DSRenderer_drawFrozenTop(Renderer* renderer);
+void N3DSRenderer_dropFrozenTop(Renderer* renderer);
+// Plain citro2d drawing in screen pixels on top of the game's frame (top or bottom screen).
+#define N3DS_OVERLAY_DEPTH 1.0f
+void N3DSRenderer_beginScreenOverlay(Renderer* renderer, bool top);
+void N3DSRenderer_endScreenOverlay(Renderer* renderer);

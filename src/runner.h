@@ -1004,11 +1004,17 @@ static inline void Runner_setActiveState(Runner* runner, Instance* instance, boo
             logInfo("VM: Instance %s (instanceId=%d,objectIndex=%d) marked as %s at (%f, %f)\n", objDef->name, instance->instanceId, instance->objectIndex, active ? "active" : "inactive", instance->x, instance->y);
         }
     }
-#else
-    (void)runner;
 #endif
 
+    bool activating = active && !instance->active;
     instance->active = active;
+    // An instance that was inactive when its room's collision grid was built (a persistent room restored with
+    // deactivated instances) isn't in that grid; without this a reactivated solid that never moves stays invisible
+    // to collisions.
+    // (An instance deactivated in its own room keeps its cells; only one that isn't in the grid is put back.)
+    if (activating && runner->spatialGrid != nullptr && arrlen(instance->collisionCells) == 0) {
+        SpatialGrid_markInstanceAsDirty(runner->spatialGrid, instance);
+    }
 }
 
 static inline GMLReal Runner_getEffectiveGameSpeed(Runner* runner) {

@@ -14,6 +14,9 @@ static bool gAtLineStart = true;
 
 void N3DSLog_init(void) {
     gLogStartMs = osGetTime();
+    // The last run's log survives one relaunch (players restart before they think of copying it).
+    remove(N3DS_SD_DIR "log_prev.txt");
+    rename(N3DS_SD_DIR "log.txt", N3DS_SD_DIR "log_prev.txt");
     gLogFile = fopen(N3DS_SD_DIR "log.txt", "w");
 }
 

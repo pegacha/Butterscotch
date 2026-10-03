@@ -3885,6 +3885,9 @@ static void persistRoomState(Runner* runner, int32_t roomIndex) {
         } else if (!inst->destroyed) {
             // Deactivated instances belong to the room too (GameMaker keeps them, still deactivated). AM2R deactivates
             // every solid away from the view each step, so dropping them emptied the room on every pause.
+            // The room's grid goes away: cells recorded in it are meaningless when the room comes back.
+            arrsetlen(inst->collisionCells, 0);
+            inst->spatialGridDirty = false;
             arrput(state->instances, inst);
         } else {
             hmdel(runner->instancesById, inst->instanceId);

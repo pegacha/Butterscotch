@@ -1,0 +1,43 @@
+# Pause and resume at the landing site, then walk right to the next room (its exit was deactivated, far from the
+# view, when the room was stored for the pause), pause there too, and keep going.
+after_room titleroom
+press 800 START 4
+press 900 START 4
+press 1000 A 4
+press 1100 A 4
+after_room rm_a0h01
+press 300 START 4
+press 440 START 4
+press 560 RIGHT 1500
+press 620 B 25
+press 720 B 25
+press 820 B 25
+press 920 B 25
+press 1020 B 25
+press 1120 B 25
+press 1220 B 25
+press 1320 B 25
+press 1420 B 25
+press 1520 B 25
+press 1620 B 25
+press 1720 B 25
+press 1820 B 25
+press 1920 B 25
+press 2020 B 25
+after_room rm_a0h02
+press 60 START 4
+press 200 START 4
+press 320 RIGHT 900
+press 360 B 25
+press 460 B 25
+press 560 B 25
+press 660 B 25
+press 760 B 25
+press 860 B 25
+press 960 B 25
+press 1060 B 25
+press 1160 B 25
+screenshot 600
+screenshot 1000
+screenshot 1300
+exit 1320

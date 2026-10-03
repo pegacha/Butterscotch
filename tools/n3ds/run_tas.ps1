@@ -30,7 +30,15 @@ $repoWin = "\\wsl.localhost\$Distro" + ($RepoInWsl -replace "/", "\")
 # The movie as a WSL path.
 $movieWsl = $Movie
 if ($Movie -match '^[A-Za-z]:\\' -or $Movie.StartsWith("\\")) {
-    $movieWsl = (& wsl.exe -d $Distro -u root -- wslpath -a "$Movie").Trim()
+    # Converted here: wsl.exe hands its arguments to a shell, which eats the backslashes before wslpath sees them.
+    $full = [IO.Path]::GetFullPath($Movie)
+    if ($full -match '^([A-Za-z]):\\(.*)$') {
+        $movieWsl = "/mnt/" + $Matches[1].ToLower() + "/" + ($Matches[2] -replace '\\', '/')
+    } elseif ($full -match ('^\\\\wsl(\.localhost|\$)\\' + [regex]::Escape($Distro) + '\\(.*)$')) {
+        $movieWsl = "/" + ($Matches[2] -replace '\\', '/')
+    } else {
+        throw "can't reach $Movie from WSL"
+    }
 }
 $name = [IO.Path]::GetFileNameWithoutExtension($movieWsl)
 $work = "/root/am2r3ds/tas/runs"

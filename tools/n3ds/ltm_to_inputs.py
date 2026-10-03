@@ -15,7 +15,16 @@ X11_TO_VK = {
     0xff0d: 13, 0xff1b: 27, 0xff08: 8, 0xff09: 9,    # return, escape, backspace, tab
     0xffe1: 16, 0xffe2: 16, 0xffe3: 17, 0xffe4: 17,  # shift, control
     0xffe9: 18, 0xffea: 18, 0x20: 32,                # alt, space
+    0xff50: 36, 0xff57: 35, 0xff55: 33, 0xff56: 34,  # home, end, page up/down
+    0xff63: 45, 0xffff: 46, 0xff13: 19,              # insert, delete, pause
+    # keypad with NumLock off (navigation keys), as GameMaker sees them on Windows
+    0xff95: 36, 0xff96: 37, 0xff97: 38, 0xff98: 39, 0xff99: 40, 0xff9a: 33, 0xff9b: 34,
+    0xff9c: 35, 0xff9d: 12, 0xff9e: 45, 0xff9f: 46, 0xff8d: 13,
+    # keypad with NumLock on
+    0xffaa: 106, 0xffab: 107, 0xffad: 109, 0xffae: 110, 0xffaf: 111,
 }
+X11_TO_VK.update({0xffb0 + i: 96 + i for i in range(10)})   # keypad 0-9
+X11_TO_VK.update({0xffbe + i: 112 + i for i in range(12)})  # F1-F12
 
 
 def vk(sym):

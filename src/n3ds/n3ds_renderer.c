@@ -206,7 +206,30 @@ typedef struct {
     uint32_t dataSize;
     uint32_t lastUsedStamp;
     uint32_t lastUsedFrame;
+    // Background read (N3DSBlobLoader): state and the blob it read, handed over under the loader's lock.
+    volatile uint8_t asyncState;
+    uint8_t* asyncData;
 } N3DSLoadedAtlasPage;
+
+enum {
+    N3DS_BLOB_IDLE,
+    N3DS_BLOB_QUEUED,
+    N3DS_BLOB_LOADING,
+    N3DS_BLOB_DONE,
+};
+
+// Reads atlas page blobs from the packed atlas on a worker thread, so a room change queues the room's pages instead
+// of reading megabytes from the SD card on the main thread. The main thread adopts finished blobs into the blob cache
+// once a frame; a page needed before its turn is read (or waited for) on the spot.
+typedef struct {
+    Thread thread;
+    LightLock lock;
+    LightEvent wake;
+    CondVar done;
+    FILE* file; // its own handle on atlas.bin (the main thread seeks the other)
+    uint32_t* queue; // stb_ds array of page indices
+    volatile bool stop;
+} N3DSBlobLoader;
 
 typedef struct {
     bool used;
@@ -423,6 +446,8 @@ typedef struct {
     uint8_t* atlasTraceMask;
     FILE* atlasTraceFile;
     FILE* packedAtlasFile;
+    N3DSBlobLoader blobLoader;
+    bool blobLoaderRunning;
     FILE* packedDirectAssetFile;
     uint32_t roomManifestEntryCount;
     uint32_t roomManifestPageRefCount;
@@ -1396,11 +1421,173 @@ static bool N3DSRenderer_evictLRUPageBlob(N3DSRenderer* renderer, uint32_t exclu
     return true;
 }
 
+// ===[ Background page blob loader ]===
+
+#define N3DS_BLOB_LOADER_STACK_SIZE (16u * 1024u)
+// Below the main thread (0x30) and the music streamer (0x31): it only ever waits on the SD card.
+#define N3DS_BLOB_LOADER_PRIORITY 0x32
+
+static void N3DSBlobLoader_main(void* arg) {
+    N3DSRenderer* renderer = arg;
+    N3DSBlobLoader* loader = &renderer->blobLoader;
+    while (true) {
+        LightEvent_Wait(&loader->wake);
+        while (true) {
+            LightLock_Lock(&loader->lock);
+            if (loader->stop) {
+                LightLock_Unlock(&loader->lock);
+                return;
+            }
+            if (arrlen(loader->queue) == 0) {
+                LightLock_Unlock(&loader->lock);
+                break;
+            }
+            uint32_t pageIndex = loader->queue[0];
+            arrdel(loader->queue, 0);
+            N3DSLoadedAtlasPage* page = &renderer->atlasPages[pageIndex];
+            // The main thread may have taken it back (it needed the page right away and read it itself).
+            if (page->asyncState != N3DS_BLOB_QUEUED) {
+                LightLock_Unlock(&loader->lock);
+                continue;
+            }
+            page->asyncState = N3DS_BLOB_LOADING;
+            uint32_t offset = page->dataOffset;
+            uint32_t size = page->dataSize;
+            LightLock_Unlock(&loader->lock);
+
+            uint8_t* data = malloc(size);
+            if (data != NULL && (fseek(loader->file, (long) offset, SEEK_SET) != 0 || fread(data, 1, size, loader->file) != size)) {
+                free(data);
+                data = NULL;
+            }
+
+            LightLock_Lock(&loader->lock);
+            page->asyncData = data;
+            page->asyncState = N3DS_BLOB_DONE;
+            CondVar_Broadcast(&loader->done);
+            LightLock_Unlock(&loader->lock);
+        }
+    }
+}
+
+static void N3DSBlobLoader_start(N3DSRenderer* renderer) {
+    if (renderer->packedAtlasFile == NULL || !N3DSRenderer_isPackedAtlasVersion(renderer->atlasVersion)) return;
+    N3DSBlobLoader* loader = &renderer->blobLoader;
+    char path[256];
+    loader->file = N3DSRenderer_openAssetFile(renderer, "atlas.bin", path, sizeof(path));
+    if (loader->file == NULL) return;
+    LightLock_Init(&loader->lock);
+    LightEvent_Init(&loader->wake, RESET_ONESHOT);
+    CondVar_Init(&loader->done);
+    loader->stop = false;
+    // The New 3DS's extra core first (the music streamer is there too; both mostly wait on the card), then the
+    // system core.
+    loader->thread = threadCreate(N3DSBlobLoader_main, renderer, N3DS_BLOB_LOADER_STACK_SIZE, N3DS_BLOB_LOADER_PRIORITY, 2, false);
+    if (loader->thread == NULL) loader->thread = threadCreate(N3DSBlobLoader_main, renderer, N3DS_BLOB_LOADER_STACK_SIZE, N3DS_BLOB_LOADER_PRIORITY, 1, false);
+    if (loader->thread == NULL) {
+        fclose(loader->file);
+        loader->file = NULL;
+        logWarn("N3DS: no background page loader thread; pages load on the main thread\n");
+        return;
+    }
+    renderer->blobLoaderRunning = true;
+}
+
+static void N3DSBlobLoader_stop(N3DSRenderer* renderer) {
+    if (!renderer->blobLoaderRunning) return;
+    N3DSBlobLoader* loader = &renderer->blobLoader;
+    LightLock_Lock(&loader->lock);
+    loader->stop = true;
+    LightLock_Unlock(&loader->lock);
+    LightEvent_Signal(&loader->wake);
+    threadJoin(loader->thread, U64_MAX);
+    threadFree(loader->thread);
+    fclose(loader->file);
+    arrfree(loader->queue);
+    repeat(renderer->atlasPageCount, i) {
+        free(renderer->atlasPages[i].asyncData);
+        renderer->atlasPages[i].asyncData = NULL;
+        renderer->atlasPages[i].asyncState = N3DS_BLOB_IDLE;
+    }
+    renderer->blobLoaderRunning = false;
+}
+
+// Asks the loader for a page's blob; false when there is no loader (the caller reads it itself).
+static bool N3DSRenderer_queuePageBlob(N3DSRenderer* renderer, uint32_t pageIndex) {
+    if (!renderer->blobLoaderRunning || pageIndex >= renderer->atlasPageCount) return false;
+    N3DSLoadedAtlasPage* page = &renderer->atlasPages[pageIndex];
+    if (page->dataSize == 0) return false;
+    if (page->t3xData != NULL || page->asyncState != N3DS_BLOB_IDLE) return true;
+    N3DSBlobLoader* loader = &renderer->blobLoader;
+    LightLock_Lock(&loader->lock);
+    page->asyncState = N3DS_BLOB_QUEUED;
+    arrput(loader->queue, pageIndex);
+    LightLock_Unlock(&loader->lock);
+    LightEvent_Signal(&loader->wake);
+    return true;
+}
+
+// Moves a finished background read into the blob cache (main thread). False if the read failed.
+static bool N3DSRenderer_adoptPageBlob(N3DSRenderer* renderer, uint32_t pageIndex) {
+    N3DSLoadedAtlasPage* page = &renderer->atlasPages[pageIndex];
+    N3DSBlobLoader* loader = &renderer->blobLoader;
+    LightLock_Lock(&loader->lock);
+    uint8_t* data = page->asyncData;
+    page->asyncData = NULL;
+    page->asyncState = N3DS_BLOB_IDLE;
+    LightLock_Unlock(&loader->lock);
+    if (data == NULL) return false;
+    if (page->t3xData != NULL) {
+        free(data);
+        return true;
+    }
+    while (renderer->cachedT3xBytes + page->dataSize > renderer->cachedT3xByteLimit) {
+        if (!N3DSRenderer_evictLRUPageBlob(renderer, pageIndex)) break;
+    }
+    page->t3xData = data;
+    page->t3xSize = page->dataSize;
+    renderer->cachedT3xBytes += page->dataSize;
+    page->blobLastUsedStamp = ++renderer->blobUseCounter;
+    return true;
+}
+
+static void N3DSRenderer_adoptFinishedPageBlobs(N3DSRenderer* renderer) {
+    if (!renderer->blobLoaderRunning) return;
+    repeat(renderer->atlasPageCount, i) {
+        if (renderer->atlasPages[i].asyncState == N3DS_BLOB_DONE) N3DSRenderer_adoptPageBlob(renderer, (uint32_t) i);
+    }
+}
+
+// A page the main thread needs now: take it back from the queue, or wait for the read in progress.
+// True when the blob is now in the cache.
+static bool N3DSRenderer_claimPageBlob(N3DSRenderer* renderer, uint32_t pageIndex) {
+    if (!renderer->blobLoaderRunning) return false;
+    N3DSLoadedAtlasPage* page = &renderer->atlasPages[pageIndex];
+    if (page->asyncState == N3DS_BLOB_IDLE) return false;
+    N3DSBlobLoader* loader = &renderer->blobLoader;
+    LightLock_Lock(&loader->lock);
+    if (page->asyncState == N3DS_BLOB_QUEUED) {
+        // Not started: cheaper to read it here than to wait behind the rest of the queue.
+        page->asyncState = N3DS_BLOB_IDLE;
+        LightLock_Unlock(&loader->lock);
+        return false;
+    }
+    u64 waitStart = N3DSProf_begin();
+    while (page->asyncState == N3DS_BLOB_LOADING) CondVar_Wait(&loader->done, &loader->lock);
+    N3DSProf_end(N3DS_PROF_IO, waitStart);
+    LightLock_Unlock(&loader->lock);
+    return N3DSRenderer_adoptPageBlob(renderer, pageIndex);
+}
+
 static bool N3DSRenderer_ensurePageBlobLoaded(N3DSRenderer* renderer, uint32_t pageIndex) {
     if (pageIndex >= renderer->atlasPageCount) return false;
     N3DSLoadedAtlasPage* page = &renderer->atlasPages[pageIndex];
     if (page->t3xData != NULL && page->t3xSize > 0) {
         page->blobLastUsedStamp = ++renderer->blobUseCounter;
+        return true;
+    }
+    if (N3DSRenderer_claimPageBlob(renderer, pageIndex)) {
+        renderer->frameBlobReads++;
         return true;
     }
 
@@ -2834,7 +3021,8 @@ static bool N3DSRenderer_prewarmPageBlobOnly(N3DSRenderer* renderer, bool* seenP
         return false;
     }
 
-    if (!N3DSRenderer_ensurePageBlobLoaded(renderer, pageIndex)) return false;
+    // Queued for the background loader when there is one, so the room starts without waiting for the card.
+    if (!N3DSRenderer_queuePageBlob(renderer, pageIndex) && !N3DSRenderer_ensurePageBlobLoaded(renderer, pageIndex)) return false;
 
     if (remainingBlobBytes != NULL && blobSize > 0) {
         if (*remainingBlobBytes > blobSize) *remainingBlobBytes -= blobSize;
@@ -3302,6 +3490,7 @@ static void N3DSRenderer_init(Renderer* base, DataWin* dataWin) {
     renderer->cachedT3xByteLimit = renderer->isNew3DS ? N3DS_MAX_CACHED_T3X_BYTES_NEW3DS : N3DS_MAX_CACHED_T3X_BYTES_OLD3DS;
     renderer->cachedDirectT3xByteLimit = renderer->isNew3DS ? N3DS_MAX_CACHED_DIRECT_T3X_BYTES_NEW3DS : N3DS_MAX_CACHED_DIRECT_T3X_BYTES_OLD3DS;
     renderer->atlasLoaded = N3DSRenderer_loadAtlas(renderer);
+    if (renderer->atlasLoaded) N3DSBlobLoader_start(renderer);
     if (!renderer->atlasLoaded && renderer->startupError[0] == '\0') {
         N3DSRenderer_setStartupError(renderer, "Failed to load 3DS graphics atlas");
     }
@@ -3344,6 +3533,7 @@ static void N3DSRenderer_destroy(Renderer* base) {
     free(renderer->roomManifestPageRefs);
     free(renderer->atlasTraceMask);
     if (renderer->atlasTraceFile != NULL) fclose(renderer->atlasTraceFile);
+    N3DSBlobLoader_stop(renderer);
     if (renderer->packedAtlasFile != NULL) fclose(renderer->packedAtlasFile);
     if (renderer->packedDirectAssetFile != NULL) fclose(renderer->packedDirectAssetFile);
     repeat(renderer->directSpriteAssetCount, spriteIndex) {
@@ -4838,6 +5028,7 @@ static void N3DSRenderer_deleteSurfaceTexture(N3DSDeferredSurfaceFree* entry) {
 
 void N3DSRenderer_collectGarbage(Renderer* base, bool all) {
     N3DSRenderer* renderer = (N3DSRenderer*) base;
+    N3DSRenderer_adoptFinishedPageBlobs(renderer);
     for (ptrdiff_t i = 0; i < arrlen(renderer->deferredSurfaceFrees);) {
         N3DSDeferredSurfaceFree* pending = &renderer->deferredSurfaceFrees[i];
         if (!all && renderer->frameSequence < pending->frame + 2u) {

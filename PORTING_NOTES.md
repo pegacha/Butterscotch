@@ -95,7 +95,7 @@ room's first frame and any frame over 100 ms with the same breakdown.
 
 ## Upstream engine fixes
 
--  : deactivated instances are kept with a persistent room (GameMaker keeps them,
+- `runner.c` `persistRoomState`: deactivated instances are kept with a persistent room (GameMaker keeps them,
   still deactivated); they were freed. AM2R deactivates every solid away from the view each step and keeps the room
   you pause in as persistent, so every pause emptied the room (142 -> 44 -> 14 instances): Samus fell through the
   world, and could vanish on the next room change.

@@ -17,6 +17,18 @@
 
 #include <assert.h>
 
+// A built-in variable read or written on a struct-index instance is a field of that struct in GMS 2.3+ games
+// (struct fields are independent of the built-ins with the same names). Games before 2.3 have no structs: the only
+// such instances are the global scope and room creation code's dummy "self", where only the per-instance built-ins
+// (x, depth...) are its own; argument0, room_width and the other game-wide built-ins keep their meaning (a script
+// called from room creation code has to read its arguments).
+static inline bool VM_builtinIsStructField(VMContext* ctx, Instance* inst, int16_t builtinVarId) {
+    if (inst == nullptr || inst->objectIndex != STRUCT_OBJECT_INDEX) return false;
+    if (IS_WAD17_OR_HIGHER(ctx)) return true;
+    return VMBuiltins_isInstanceScopedBuiltinVar(builtinVarId);
+}
+
+
 // ===[ Stack Operations ]===
 
 #ifdef ENABLE_VM_TRACING
@@ -757,7 +769,7 @@ static RValue resolveVariableRead(VMContext* ctx, int32_t instanceType, uint32_t
     // Check for built-in variable (varID == -6 sentinel)
     if (varDef->varID == VARIABLE_BUILTIN) {
         // Struct fields are independent of instance built-ins with the same names.
-        if (targetInstance != nullptr && targetInstance->objectIndex == STRUCT_OBJECT_INDEX) {
+        if (VM_builtinIsStructField(ctx, targetInstance, varDef->builtinVarId)) {
             ptrdiff_t nameSlot = shgeti(ctx->varNameMap, (char*) varDef->name);
             if (nameSlot >= 0) {
                 int32_t structVarID = ctx->varNameMap[nameSlot].value;
@@ -852,7 +864,7 @@ static RValue resolveVariableRead(VMContext* ctx, int32_t instanceType, uint32_t
 static void writeSingleInstanceVariable(VMContext* ctx, Instance* inst, Variable* varDef, ArrayAccess* access, RValue val) {
     // Built-in variable (varID == -6 sentinel)
     if (varDef->varID == VARIABLE_BUILTIN) {
-        if (inst != nullptr && inst->objectIndex == STRUCT_OBJECT_INDEX)
+        if (VM_builtinIsStructField(ctx, inst, varDef->builtinVarId))
             VM_structSet(ctx, inst, varDef->name, val, access->arrayIndex);
         else
             VMBuiltins_setVariable(ctx, inst, varDef->builtinVarId, varDef->name, val, access->arrayIndex);
@@ -1022,7 +1034,7 @@ static void resolveVariableWrite(VMContext* ctx, int32_t instanceType, uint32_t 
 
     // Check for built-in variable (varID == -6 sentinel)
     if (varDef->varID == VARIABLE_BUILTIN) {
-        if (targetInstance != nullptr && targetInstance->objectIndex == STRUCT_OBJECT_INDEX)
+        if (VM_builtinIsStructField(ctx, targetInstance, varDef->builtinVarId))
             VM_structSet(ctx, targetInstance, varDef->name, val, access.arrayIndex);
         else
             VMBuiltins_setVariable(ctx, targetInstance, varDef->builtinVarId, varDef->name, val, access.arrayIndex);

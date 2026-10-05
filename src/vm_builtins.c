@@ -603,6 +603,10 @@ static bool isInstanceScopedBuiltinVar(int16_t builtinVarId) {
     }
 }
 
+bool VMBuiltins_isInstanceScopedBuiltinVar(int16_t builtinVarId) {
+    return isInstanceScopedBuiltinVar(builtinVarId);
+}
+
 RValue VMBuiltins_getVariable(VMContext* ctx, Instance* inst, int16_t builtinVarId, const char* name, int32_t arrayIndex) {
     Runner* runner = ctx->runner;
     requireNotNull(runner);

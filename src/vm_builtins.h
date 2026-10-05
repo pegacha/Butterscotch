@@ -281,6 +281,9 @@ int16_t VMBuiltins_resolveBuiltinVarId(const char* name);
 // Asserts at startup that the internal builtin-var lookup table is strictly sorted by strcmp order (required for bsearch) and has no duplicates.
 void VMBuiltins_checkIfBuiltinVarTableIsSorted(void);
 RValue VMBuiltins_getVariable(VMContext* ctx, Instance* inst, int16_t builtinVarId, const char* name, int32_t arrayIndex);
+// Whether a built-in variable belongs to an instance (x, depth, sprite_index...), as opposed to the game (room,
+// argument0, view_xview...).
+bool VMBuiltins_isInstanceScopedBuiltinVar(int16_t builtinVarId);
 void VMBuiltins_setVariable(VMContext* ctx, Instance* inst, int16_t builtinVarId, const char* name, RValue val, int32_t arrayIndex);
 
 #endif /* _BS_VM_BUILTINS_H_ */

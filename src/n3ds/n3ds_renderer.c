@@ -5903,6 +5903,16 @@ static void N3DSRenderer_drawSpritePartColor(Renderer* base, int32_t tpagIndex, 
     N3DS_UNIMPL("drawSpritePartColor", "tpag=%d", (int) tpagIndex);
 }
 
+// The Renderer interface takes float source rectangles (upstream a13f932); the 3DS drawing works on whole texels,
+// as the interface did before: truncate like the old RValue_toInt32 conversion.
+static void N3DSRenderer_drawSpritePartF(Renderer* base, int32_t tpagIndex, float srcOffX, float srcOffY, float srcW, float srcH, float x, float y, float xscale, float yscale, float angleDeg, float pivotX, float pivotY, uint32_t color, float alpha) {
+    N3DSRenderer_drawSpritePart(base, tpagIndex, (int32_t) srcOffX, (int32_t) srcOffY, (int32_t) srcW, (int32_t) srcH, x, y, xscale, yscale, angleDeg, pivotX, pivotY, color, alpha);
+}
+
+static void N3DSRenderer_drawSpritePartColorF(Renderer* base, int32_t tpagIndex, float srcOffX, float srcOffY, float srcW, float srcH, float x, float y, float xscale, float yscale, float angleDeg, float pivotX, float pivotY, uint32_t color1, uint32_t color2, uint32_t color3, uint32_t color4, float alpha) {
+    N3DSRenderer_drawSpritePartColor(base, tpagIndex, (int32_t) srcOffX, (int32_t) srcOffY, (int32_t) srcW, (int32_t) srcH, x, y, xscale, yscale, angleDeg, pivotX, pivotY, color1, color2, color3, color4, alpha);
+}
+
 static void N3DSRenderer_drawRectangleColor(Renderer* base, float x1, float y1, float x2, float y2, uint32_t color1, uint32_t color2, uint32_t color3, uint32_t color4, float alpha, bool outline) {
     if (color1 == color2 && color2 == color3 && color3 == color4) {
         N3DSRenderer_drawRectangle(base, x1, y1, x2, y2, color1, alpha, outline);
@@ -5997,8 +6007,8 @@ static RendererVtable N3DSRenderer_vtable = {
     .setGuiProjection = N3DSRenderer_setGuiProjection,
     .endGUI = N3DSRenderer_endGUI,
     .drawSprite = N3DSRenderer_drawSprite,
-    .drawSpritePart = N3DSRenderer_drawSpritePart,
-    .drawSpritePartColor = N3DSRenderer_drawSpritePartColor,
+    .drawSpritePart = N3DSRenderer_drawSpritePartF,
+    .drawSpritePartColor = N3DSRenderer_drawSpritePartColorF,
     .drawSpritePos = N3DSRenderer_drawSpritePos,
     .drawRectangle = N3DSRenderer_drawRectangle,
     .drawRectangleColor = N3DSRenderer_drawRectangleColor,

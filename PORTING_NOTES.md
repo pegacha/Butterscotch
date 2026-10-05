@@ -19,7 +19,7 @@ preprocessor change means a new revision and a new SD folder.
 
 CI (`.github/workflows/build-n3ds.yml`): every push builds the AM2R profile in the `devkitpro/devkitarm` container
 (makerom built from 3DSGuy/Project_CTR at a pinned tag) and uploads `am2r.cia`, `am2r.3dsx` and `am2r.elf` as the
-`am2r-3ds` artifact. Every passing run except pull requests is also a GitHub release with those files and a QR code
+`am2r-3ds` artifact. Every passing run except pull requests and `claude/*` branches is also a GitHub release with those files and a QR code
 of the CIA's download link for FBI (Remote Install -> Scan QR Code): branch pushes as `am2r-3ds-b<run number>`
 (pre-releases except on `main`, so `releases/latest/download/am2r.cia` is the newest `main` build), pushed
 tags and releases made on GitHub under their own tag.

@@ -1,7 +1,7 @@
 name: Build (Nintendo 3DS)
 
-# Builds the AM2R 3DS program (tools/n3ds/build.sh). Every passing run except pull requests is published as a
-# GitHub release with am2r.cia, am2r.3dsx, the ELF (for symbolizing crashes) and a QR code for FBI's Remote
+# Builds the AM2R 3DS program (tools/n3ds/build.sh). Every passing run except pull requests and claude/* branches
+# (work in progress) is published as a GitHub release with am2r.cia, am2r.3dsx, the ELF (for symbolizing crashes) and a QR code for FBI's Remote
 # Install: branch pushes as am2r-3ds-b<run number> (pre-releases except on main, so releases/latest is the
 # newest main build), pushed tags and releases made on GitHub under their own tag.
 
@@ -68,7 +68,7 @@ jobs:
           path: out/
 
       - name: Publish release
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/heads/claude/')
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}

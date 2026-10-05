@@ -26,7 +26,8 @@ re-implementation of the GameMaker: Studio runner in C. Butterscotch runs the ga
 
 2. **The program.** Open the [latest release](../../releases/latest) and scan its QR code with FBI
    (Remote Install → Scan QR Code), or download `am2r.cia` and install it with FBI from the SD card.
-   Every passing build is published as a release; builds from branches other than `main` are marked pre-release.
+   Every passing build is published as a release; builds from branches other than `main` are marked pre-release
+   (`claude/*` work-in-progress branches only get a build artifact).
 
 Saves and `log.txt` go in `sdmc:/3ds/am2r/`. The 3DS button layout is in [res/n3ds/am2r/README.md](res/n3ds/am2r/README.md);
 the game's own Joypad menu can rebind it. The pause screen opens on the bottom screen and is driven by touch.

@@ -13,13 +13,13 @@ re-implementation of the GameMaker: Studio runner in C. Butterscotch runs the ga
 
 ## Install
 
-1. **SD card files.** On a PC (Linux or WSL, with [devkitPro](https://devkitpro.org/wiki/Getting_Started)'s 3DS
-   tools for `tex3ds`), build the game folder from your AM2R 1.1 install and copy it to the card:
-
-   ```bash
-   tools/n3ds/make_sd.sh <AM2R 1.1 folder with data.win> sd/3ds/am2r
-   # then copy sd/3ds/am2r to sdmc:/3ds/am2r/
-   ```
+1. **SD card files.** Download `am2r-sd.bat` (Windows) or `am2r-sd.sh` (Linux) from the
+   [latest release](../../releases/latest) and run it. Pick your AM2R 1.1 `data.win` (or the Community Updates one
+   made with the [AM2R Launcher](https://github.com/AM2R-Community-Developers/AM2RLauncher)) and a folder; it writes
+   `<folder>/3ds/am2r/`, which you copy to the root of the SD card, and downloads `am2r.cia` next to it.
+   - On Windows it runs in WSL, and offers to install WSL (administrator rights and a restart) if it isn't there.
+   - The first run downloads the tools it needs (the preprocessor and devkitPro's `tex3ds`) into its own folder.
+   - Developers can also run `tools/n3ds/make_sd.sh <game folder> <out>` from a checkout (needs devkitPro).
 
    The folder only needs rebuilding when a release says it needs a newer SD data revision; the game tells you at
    startup if the card's folder is out of date.

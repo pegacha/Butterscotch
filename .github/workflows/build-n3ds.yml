@@ -66,6 +66,20 @@ jobs:
           cp build/butterscotch.elf out/am2r.elf
           ls -la out
 
+      - name: Build the SD card kit
+        run: |
+          # What tools/n3ds/sdkit/am2r-sd.sh downloads: the preprocessor (static: runs on any Linux / WSL), tex3ds,
+          # the SD data revision and the 3DS control config.
+          cmake -S tools/n3ds-preprocess -B build-preprocess -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS=-static
+          cmake --build build-preprocess
+          mkdir -p kit/bin kit/seed
+          cp build-preprocess/n3ds-preprocess "$DEVKITPRO/tools/bin/tex3ds" kit/bin/
+          cp tools/n3ds/sd_data_rev.txt kit/
+          cp res/n3ds/am2r/sd/config.ini kit/seed/
+          tar -czf out/am2r-sd-tools.tar.gz -C kit bin sd_data_rev.txt seed
+          cp tools/n3ds/sdkit/am2r-sd.sh tools/n3ds/sdkit/am2r-sd.bat out/
+          ls -la out
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -116,7 +130,9 @@ jobs:
             echo
             echo "## SD card"
             echo
-            echo "The game's files go in \`sdmc:/3ds/am2r/\`, made from AM2R 1.1 with \`tools/n3ds/make_sd.sh\`."
+            echo "The game's files go in \`sdmc:/3ds/am2r/\`, made from your AM2R 1.1 (or Community Updates) \`data.win\`:"
+            echo "run **am2r-sd.bat** on Windows (it sets up WSL if needed) or **am2r-sd.sh** on Linux, pick the \`data.win\` and a"
+            echo "folder, and copy the \`3ds\` folder it makes to the root of the SD card."
             echo "This build needs SD data revision $(cat tools/n3ds/sd_data_rev.txt) (\`sd_data_rev.txt\` on the card)."
             echo
             echo "$built"
@@ -132,4 +148,5 @@ jobs:
           else
             gh release create "$tag" --title "$title" --notes-file notes.md "${create_args[@]}"
           fi
-          gh release upload "$tag" --clobber out/am2r.cia out/am2r.3dsx out/am2r.elf out/am2r-cia-qr.png
+          gh release upload "$tag" --clobber out/am2r.cia out/am2r.3dsx out/am2r.elf out/am2r-cia-qr.png \
+            out/am2r-sd-tools.tar.gz out/am2r-sd.sh out/am2r-sd.bat

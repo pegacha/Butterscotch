@@ -1,0 +1,435 @@
+#include "n3ds_am2r.h"
+
+#include "n3ds_gml.h"
+#include "n3ds_platform_config.h"
+
+#include "../log.h"
+#include "../renderer.h"
+#include "../utils.h"
+#include "../vm.h"
+
+#include <stdio.h>
+#include <string.h>
+
+// What this works with in AM2R (1.1 and the Community Updates):
+//  - get_text(section, key) reads lang/<language>.ini; get_xjoybtnname(button) / get_xjoybtnsprite(button) give the
+//    name ("A", "LB", "Back"...) and the icon (sXJoyBtnA...) of an XInput button for prompts and the Joypad menu.
+//  - Options pages are objects created at (50, 92): oOptionsMain (rows Display, Sound, Control, [Extras,] Exit),
+//    oOptionsDisplay, oOptionsControl... A page keeps its rows in op[] (oPauseOption / oOptionLR / oMenuLabel
+//    instances with label, optext, optionid, enabled), skips rows with canedit[i] == 0, highlights the row whose
+//    optionid is global.curropt and shows global.tiptext. Menu input comes from oControl.kUp/kDown/kLeft/kRight/
+//    kMenu1/kMenu2 and k*PushedSteps (0 on the frame of the press). Going back recreates oOptionsMain.
+//  - Weapons hurt enemies by their `damage` (oBeam, oMissile, oMissileExpl, oBombExpl, oPBombExpl); Metroids take a
+//    fixed amount per missile instead, from myhealth.
+
+#define N3DS_AM2R_PAGE_X 50.0f
+#define N3DS_AM2R_PAGE_Y 92.0f
+#define N3DS_AM2R_ROW_SEP 16.0f
+#define N3DS_AM2R_SUPER_DAMAGE 5000.0
+#define N3DS_AM2R_CHEATS_FILE N3DS_SD_DIR "cheats.ini"
+
+enum { CHEAT_MASTER, CHEAT_HEALTH, CHEAT_AMMO, CHEAT_BEAM, CHEAT_BOMBS, CHEAT_MISSILES, CHEAT_COUNT };
+
+static const char* const kCheatNames[CHEAT_COUNT] = { "master", "health", "ammo", "beam", "bombs", "missiles" };
+static const char* const kCheatLabels[CHEAT_COUNT] = {
+    "Cheats", "Unlimited Health", "Unlimited Ammo", "Super Beam", "Super Bombs", "Super Missiles",
+};
+static const char* const kCheatTips[CHEAT_COUNT] = {
+    "Turn all cheats on or off",
+    "Energy stays full",
+    "Missiles, Super Missiles and Power Bombs stay full",
+    "Beam shots destroy anything they hit",
+    "Bombs and Power Bombs destroy anything they hit",
+    "Missiles destroy anything they hit, Metroids too",
+};
+
+typedef struct {
+    const char* name;
+    BuiltinFunc hook;
+    int32_t script; // the game's own script, called by the hook
+} N3DSAm2rHook;
+
+typedef struct {
+    Runner* runner;
+    bool active;
+    int32_t objOptionsMain, objOptionsDisplay, objOptionsControl, objControl;
+    int32_t objMenuLabel, objOptionLR, objPauseOption, objWaterFX;
+    int32_t objBeam, objMissile, objMissileExpl, objBombExpl, objPBombExpl;
+    int32_t objMetroids[4];
+    int32_t sprA, sprB, sprX, sprY;
+    int32_t sfxPlay, sndMenuMove, sndMenuSel;
+    char* keyboardLabel; // what get_text gave for the Keyboard settings row
+    int32_t lastControlPage;
+    bool cheats[CHEAT_COUNT];
+    // The Cheats page while it is up: instance ids of its title and rows (CHEAT_COUNT toggles, then Exit).
+    bool pageOpen;
+    int32_t pageFrames;
+    int32_t pageTitle;
+    int32_t pageRows[CHEAT_COUNT + 1];
+} N3DSAm2r;
+
+static N3DSAm2r gAm2r;
+
+static RValue hookGetText(VMContext* ctx, RValue* args, int32_t argCount);
+static RValue hookGetXJoyBtnName(VMContext* ctx, RValue* args, int32_t argCount);
+static RValue hookGetXJoyBtnSprite(VMContext* ctx, RValue* args, int32_t argCount);
+
+static N3DSAm2rHook gHooks[] = {
+    { "get_text", hookGetText, -1 },
+    { "get_xjoybtnname", hookGetXJoyBtnName, -1 },
+    { "get_xjoybtnsprite", hookGetXJoyBtnSprite, -1 },
+};
+
+static int32_t N3DSAm2r_hookScript(BuiltinFunc hook) {
+    for (size_t i = 0; i < sizeof(gHooks) / sizeof(gHooks[0]); i++) {
+        if (gHooks[i].hook == hook) return gHooks[i].script;
+    }
+    return -1;
+}
+
+static RValue N3DSAm2r_callOriginal(BuiltinFunc hook, RValue* args, int32_t argCount) {
+    return N3DSGml_callScript(N3DSAm2r_hookScript(hook), args, argCount);
+}
+
+// ===[ Nintendo buttons ]===
+
+// "XBox 360 Joypad Configuration" -> "Nintendo 3DS Configuration".
+static char* N3DSAm2r_nintendoText(const char* text) {
+    static const char* const xbox[] = { "XBox 360 Joypad", "Xbox 360 Joypad", "XBOX 360 Joypad", "XBox 360", "Xbox 360", "XBOX 360" };
+    for (size_t i = 0; i < sizeof(xbox) / sizeof(xbox[0]); i++) {
+        const char* at = strstr(text, xbox[i]);
+        if (at == NULL) continue;
+        const char* with = "Nintendo 3DS";
+        size_t before = (size_t) (at - text), skip = strlen(xbox[i]);
+        char* out = safeMalloc(strlen(text) - skip + strlen(with) + 1);
+        memcpy(out, text, before);
+        strcpy(out + before, with);
+        strcat(out, at + skip);
+        return out;
+    }
+    return NULL;
+}
+
+static RValue hookGetText(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    const char* section = argCount > 0 && args[0].type == RVALUE_STRING ? args[0].string : "";
+    const char* key = argCount > 1 && args[1].type == RVALUE_STRING ? args[1].string : "";
+    if (strcmp(section, "OptionsMain") == 0 && strcmp(key, "Display") == 0) return RValue_makeOwnedString(safeStrdup("Cheats"));
+    if (strcmp(section, "OptionsMain") == 0 && strcmp(key, "Display_Tip") == 0) {
+        return RValue_makeOwnedString(safeStrdup("Unlimited health and ammo, stronger weapons"));
+    }
+    RValue result = N3DSAm2r_callOriginal(hookGetText, args, argCount);
+    if (result.type != RVALUE_STRING || result.string == NULL) return result;
+    if (strcmp(section, "OptionsControl") == 0 && strcmp(key, "KeyboardSettings") == 0) {
+        free(gAm2r.keyboardLabel);
+        gAm2r.keyboardLabel = safeStrdup(result.string);
+    }
+    char* nintendo = N3DSAm2r_nintendoText(result.string);
+    if (nintendo == NULL) return result;
+    RValue_free(&result);
+    return RValue_makeOwnedString(nintendo);
+}
+
+// Xbox buttons by position -> the 3DS buttons in those positions.
+static RValue hookGetXJoyBtnName(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    static const char* const map[][2] = {
+        { "A", "B" }, { "B", "A" }, { "X", "Y" }, { "Y", "X" }, { "LB", "L" }, { "RB", "R" }, { "LT", "ZL" },
+        { "RT", "ZR" }, { "LStick", "Circle Pad" }, { "RStick", "C-Stick" }, { "Back", "Select" },
+    };
+    RValue result = N3DSAm2r_callOriginal(hookGetXJoyBtnName, args, argCount);
+    if (result.type != RVALUE_STRING || result.string == NULL) return result;
+    for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
+        if (strcmp(result.string, map[i][0]) != 0) continue;
+        RValue_free(&result);
+        return RValue_makeOwnedString(safeStrdup(map[i][1]));
+    }
+    return result;
+}
+
+// The icons show Xbox letters: the 3DS's B is where the Xbox's A is (and so on), so swap A/B and X/Y.
+static RValue hookGetXJoyBtnSprite(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    RValue result = N3DSAm2r_callOriginal(hookGetXJoyBtnSprite, args, argCount);
+    int32_t sprite = RValue_toInt32(result);
+    int32_t swapped = sprite;
+    if (sprite == gAm2r.sprA) swapped = gAm2r.sprB;
+    else if (sprite == gAm2r.sprB) swapped = gAm2r.sprA;
+    else if (sprite == gAm2r.sprX) swapped = gAm2r.sprY;
+    else if (sprite == gAm2r.sprY) swapped = gAm2r.sprX;
+    if (swapped == sprite || swapped < 0) return result;
+    RValue_free(&result);
+    return RValue_makeReal((GMLReal) swapped);
+}
+
+// ===[ Cheats file ]===
+
+static void N3DSAm2r_loadCheats(void) {
+    FILE* f = fopen(N3DS_AM2R_CHEATS_FILE, "r");
+    if (f == NULL) return;
+    char line[64];
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char name[32];
+        int value = 0;
+        if (sscanf(line, "%31[^=]=%d", name, &value) != 2) continue;
+        for (int i = 0; i < CHEAT_COUNT; i++) {
+            if (strcmp(name, kCheatNames[i]) == 0) gAm2r.cheats[i] = value != 0;
+        }
+    }
+    fclose(f);
+}
+
+static void N3DSAm2r_saveCheats(void) {
+    FILE* f = fopen(N3DS_AM2R_CHEATS_FILE, "w");
+    if (f == NULL) return;
+    for (int i = 0; i < CHEAT_COUNT; i++) fprintf(f, "%s=%d\n", kCheatNames[i], gAm2r.cheats[i] ? 1 : 0);
+    fclose(f);
+}
+
+static bool N3DSAm2r_cheat(int which) {
+    return gAm2r.cheats[CHEAT_MASTER] && gAm2r.cheats[which];
+}
+
+// ===[ Init ]===
+
+void N3DSAm2r_init(Runner* runner) {
+    memset(&gAm2r, 0, sizeof(gAm2r));
+    gAm2r.runner = runner;
+    gAm2r.lastControlPage = -1;
+    gAm2r.objOptionsMain = N3DSGml_objectIndex("oOptionsMain");
+    gAm2r.objOptionsDisplay = N3DSGml_objectIndex("oOptionsDisplay");
+    gAm2r.objOptionsControl = N3DSGml_objectIndex("oOptionsControl");
+    gAm2r.objControl = N3DSGml_objectIndex("oControl");
+    gAm2r.objMenuLabel = N3DSGml_objectIndex("oMenuLabel");
+    gAm2r.objOptionLR = N3DSGml_objectIndex("oOptionLR");
+    gAm2r.objPauseOption = N3DSGml_objectIndex("oPauseOption");
+    gAm2r.objWaterFX = N3DSGml_objectIndex("oWaterFXV2");
+    gAm2r.objBeam = N3DSGml_objectIndex("oBeam");
+    gAm2r.objMissile = N3DSGml_objectIndex("oMissile");
+    gAm2r.objMissileExpl = N3DSGml_objectIndex("oMissileExpl");
+    gAm2r.objBombExpl = N3DSGml_objectIndex("oBombExpl");
+    gAm2r.objPBombExpl = N3DSGml_objectIndex("oPBombExpl");
+    gAm2r.objMetroids[0] = N3DSGml_objectIndex("oMAlpha");
+    gAm2r.objMetroids[1] = N3DSGml_objectIndex("oMGamma");
+    gAm2r.objMetroids[2] = N3DSGml_objectIndex("oMZeta");
+    gAm2r.objMetroids[3] = N3DSGml_objectIndex("oMOmega");
+    gAm2r.sprA = N3DSGml_spriteIndex("sXJoyBtnA");
+    gAm2r.sprB = N3DSGml_spriteIndex("sXJoyBtnB");
+    gAm2r.sprX = N3DSGml_spriteIndex("sXJoyBtnX");
+    gAm2r.sprY = N3DSGml_spriteIndex("sXJoyBtnY");
+    gAm2r.sfxPlay = N3DSGml_scriptIndex("sfx_play");
+    gAm2r.sndMenuMove = N3DSGml_soundIndex("sndMenuMove");
+    gAm2r.sndMenuSel = N3DSGml_soundIndex("sndMenuSel");
+    gAm2r.active = gAm2r.objOptionsMain >= 0 && gAm2r.objControl >= 0;
+    if (!gAm2r.active) return;
+
+    VMContext* vm = runner->vmContext;
+    DataWin* dataWin = runner->dataWin;
+    for (uint32_t i = 0; i < vm->funcCallCacheCount; i++) {
+        const char* name = dataWin->func.functions[i].name;
+        if (name == NULL) continue;
+        for (size_t h = 0; h < sizeof(gHooks) / sizeof(gHooks[0]); h++) {
+            if (strcmp(name, gHooks[h].name) != 0) continue;
+            int32_t script = N3DSGml_scriptIndex(name);
+            if (script < 0) break;
+            gHooks[h].script = script;
+            vm->funcCallCache[i].builtin = (void*) gHooks[h].hook;
+            logInfo("AM2R: %s goes through the 3DS front end\n", name);
+        }
+    }
+    N3DSAm2r_loadCheats();
+}
+
+// ===[ Options ]===
+
+static void N3DSAm2r_sfx(int32_t sound) {
+    if (gAm2r.sfxPlay < 0 || sound < 0) return;
+    RValue arg = RValue_makeReal((GMLReal) sound);
+    RValue result = N3DSGml_callScript(gAm2r.sfxPlay, &arg, 1);
+    RValue_free(&result);
+}
+
+// The Keyboard settings row of the Control page: hidden, the rows below move up.
+static void N3DSAm2r_hideKeyboardRow(void) {
+    Instance* page = N3DSGml_firstInstance(gAm2r.objOptionsControl);
+    if (page == NULL || gAm2r.keyboardLabel == NULL || (int32_t) page->instanceId == gAm2r.lastControlPage) return;
+    gAm2r.lastControlPage = (int32_t) page->instanceId;
+    double last = 0.0;
+    if (!N3DSGml_getVar(page, "lastitem", &last)) return;
+    for (int32_t k = 0; k <= (int32_t) last; k++) {
+        double id = -1.0;
+        if (!N3DSGml_getVarElement(page, "op", k, &id)) continue;
+        Instance* row = N3DSGml_instanceById((int32_t) id);
+        const char* label = row != NULL ? N3DSGml_getVarString(row, "label") : NULL;
+        if (label == NULL || strcmp(label, gAm2r.keyboardLabel) != 0) continue;
+        N3DSGml_setVarElement(page, "canedit", k, 0.0);
+        row->visible = false;
+        for (int32_t j = k + 1; j <= (int32_t) last; j++) {
+            double otherId = -1.0;
+            if (!N3DSGml_getVarElement(page, "op", j, &otherId)) continue;
+            Instance* other = N3DSGml_instanceById((int32_t) otherId);
+            if (other != NULL && other->y > row->y) other->y -= N3DS_AM2R_ROW_SEP;
+        }
+        double curropt = 0.0;
+        if (N3DSGml_getGlobal("curropt", -1, &curropt) && (int32_t) curropt == k) N3DSGml_setGlobal("curropt", (double) (k + 1));
+        return;
+    }
+}
+
+static Instance* N3DSAm2r_pageRow(int i) {
+    return N3DSGml_instanceById(gAm2r.pageRows[i]);
+}
+
+static void N3DSAm2r_refreshCheatsPage(void) {
+    for (int i = 0; i < CHEAT_COUNT; i++) {
+        Instance* row = N3DSAm2r_pageRow(i);
+        if (row == NULL) continue;
+        N3DSGml_setVarString(row, "optext", gAm2r.cheats[i] ? "ON" : "OFF");
+        N3DSGml_setVar(row, "enabled", (i == CHEAT_MASTER || gAm2r.cheats[CHEAT_MASTER]) ? 1.0 : 0.0);
+    }
+    double curropt = 0.0;
+    N3DSGml_getGlobal("curropt", -1, &curropt);
+    int32_t selected = (int32_t) curropt;
+    N3DSGml_setGlobalString("tiptext", selected >= 0 && selected < CHEAT_COUNT ? kCheatTips[selected] : "Back to the options");
+}
+
+// In place of the Display page (created by oOptionsMain at (50, 92)).
+static void N3DSAm2r_openCheatsPage(void) {
+    float x = N3DS_AM2R_PAGE_X, y = N3DS_AM2R_PAGE_Y - 8.0f;
+    Instance* title = N3DSGml_create(x, y, gAm2r.objMenuLabel);
+    if (title != NULL) N3DSGml_setVarString(title, "text", "Cheats");
+    gAm2r.pageTitle = title != NULL ? (int32_t) title->instanceId : -1;
+    for (int i = 0; i <= CHEAT_COUNT; i++) {
+        bool exitRow = i == CHEAT_COUNT;
+        Instance* row = N3DSGml_create(x, y + N3DS_AM2R_ROW_SEP * (float) (i + 1), exitRow ? gAm2r.objPauseOption : gAm2r.objOptionLR);
+        gAm2r.pageRows[i] = row != NULL ? (int32_t) row->instanceId : -1;
+        if (row == NULL) continue;
+        N3DSGml_setVar(row, "optionid", (double) i);
+        N3DSGml_setVarString(row, "label", exitRow ? "Exit" : kCheatLabels[i]);
+    }
+    N3DSGml_setGlobal("curropt", 0.0);
+    gAm2r.pageOpen = true;
+    gAm2r.pageFrames = 0;
+    N3DSAm2r_refreshCheatsPage();
+}
+
+static void N3DSAm2r_closeCheatsPage(bool backToOptions) {
+    N3DSGml_destroy(N3DSGml_instanceById(gAm2r.pageTitle));
+    for (int i = 0; i <= CHEAT_COUNT; i++) N3DSGml_destroy(N3DSAm2r_pageRow(i));
+    gAm2r.pageOpen = false;
+    N3DSAm2r_saveCheats();
+    if (backToOptions) N3DSGml_create(N3DS_AM2R_PAGE_X, N3DS_AM2R_PAGE_Y, gAm2r.objOptionsMain);
+}
+
+static bool N3DSAm2r_pressed(Instance* control, const char* key) {
+    char steps[32];
+    snprintf(steps, sizeof(steps), "%sPushedSteps", key);
+    double down = 0.0, pushed = 1.0;
+    return N3DSGml_getVar(control, key, &down) && down > 0.0 && N3DSGml_getVar(control, steps, &pushed) && pushed == 0.0;
+}
+
+static void N3DSAm2r_updateCheatsPage(void) {
+    // The page's instances go with the room (leaving the pause screen): nothing to go back to then.
+    if (N3DSAm2r_pageRow(CHEAT_COUNT) == NULL) {
+        gAm2r.pageOpen = false;
+        N3DSAm2r_saveCheats();
+        return;
+    }
+    // Like the game's pages: input after a few frames, so the press that opened the page doesn't act on it.
+    if (++gAm2r.pageFrames < 5) return;
+    Instance* control = N3DSGml_firstInstance(gAm2r.objControl);
+    if (control == NULL) return;
+    double curropt = 0.0;
+    N3DSGml_getGlobal("curropt", -1, &curropt);
+    int32_t selected = (int32_t) curropt;
+    if (selected < 0 || selected > CHEAT_COUNT) selected = 0;
+    if (N3DSAm2r_pressed(control, "kDown")) {
+        selected = selected >= CHEAT_COUNT ? 0 : selected + 1;
+        N3DSAm2r_sfx(gAm2r.sndMenuMove);
+    } else if (N3DSAm2r_pressed(control, "kUp")) {
+        selected = selected <= 0 ? CHEAT_COUNT : selected - 1;
+        N3DSAm2r_sfx(gAm2r.sndMenuMove);
+    } else if (N3DSAm2r_pressed(control, "kMenu2") || (selected == CHEAT_COUNT && N3DSAm2r_pressed(control, "kMenu1"))) {
+        N3DSAm2r_sfx(gAm2r.sndMenuSel);
+        N3DSAm2r_closeCheatsPage(true);
+        return;
+    } else if (selected < CHEAT_COUNT && (N3DSAm2r_pressed(control, "kMenu1") || N3DSAm2r_pressed(control, "kLeft") ||
+                                          N3DSAm2r_pressed(control, "kRight"))) {
+        gAm2r.cheats[selected] = !gAm2r.cheats[selected];
+        N3DSAm2r_sfx(gAm2r.sndMenuSel);
+    }
+    N3DSGml_setGlobal("curropt", (double) selected);
+    N3DSAm2r_refreshCheatsPage();
+}
+
+// ===[ Cheat effects ]===
+
+static void N3DSAm2r_setAll(int32_t objectIndex, const char* var, double value) {
+    if (objectIndex < 0) return;
+    Instance* list[32];
+    int32_t n = N3DSGml_instances(objectIndex, list, 32);
+    for (int32_t i = 0; i < n; i++) N3DSGml_setVar(list[i], var, value);
+}
+
+static void N3DSAm2r_fillGlobal(const char* var, const char* maxVar) {
+    double max = 0.0;
+    if (N3DSGml_getGlobal(maxVar, -1, &max)) N3DSGml_setGlobal(var, max);
+}
+
+static void N3DSAm2r_applyCheats(void) {
+    if (!gAm2r.cheats[CHEAT_MASTER]) return;
+    double inGame = 0.0;
+    if (!N3DSGml_getGlobal("ingame", -1, &inGame) || inGame == 0.0) return;
+    if (N3DSAm2r_cheat(CHEAT_HEALTH)) N3DSAm2r_fillGlobal("playerhealth", "maxhealth");
+    if (N3DSAm2r_cheat(CHEAT_AMMO)) {
+        N3DSAm2r_fillGlobal("missiles", "maxmissiles");
+        N3DSAm2r_fillGlobal("smissiles", "maxsmissiles");
+        N3DSAm2r_fillGlobal("pbombs", "maxpbombs");
+    }
+    if (N3DSAm2r_cheat(CHEAT_BEAM)) N3DSAm2r_setAll(gAm2r.objBeam, "damage", N3DS_AM2R_SUPER_DAMAGE);
+    if (N3DSAm2r_cheat(CHEAT_BOMBS)) {
+        N3DSAm2r_setAll(gAm2r.objBombExpl, "damage", N3DS_AM2R_SUPER_DAMAGE);
+        N3DSAm2r_setAll(gAm2r.objPBombExpl, "damage", N3DS_AM2R_SUPER_DAMAGE);
+    }
+    if (N3DSAm2r_cheat(CHEAT_MISSILES)) {
+        N3DSAm2r_setAll(gAm2r.objMissile, "damage", N3DS_AM2R_SUPER_DAMAGE);
+        N3DSAm2r_setAll(gAm2r.objMissileExpl, "damage", N3DS_AM2R_SUPER_DAMAGE);
+        // Metroids take a fixed amount per missile: one hit is enough.
+        for (int m = 0; m < 4; m++) {
+            if (gAm2r.objMetroids[m] < 0) continue;
+            Instance* list[8];
+            int32_t n = N3DSGml_instances(gAm2r.objMetroids[m], list, 8);
+            for (int32_t i = 0; i < n; i++) {
+                double health = 0.0;
+                if (N3DSGml_getVar(list[i], "myhealth", &health) && health > 1.0) N3DSGml_setVar(list[i], "myhealth", 1.0);
+            }
+        }
+    }
+}
+
+// ===[ Water / lava ripple filter ]===
+
+static void N3DSAm2r_dropWaterFilter(void) {
+    if (gAm2r.objWaterFX < 0) return;
+    Instance* filter = N3DSGml_anyInstance(gAm2r.objWaterFX);
+    if (filter == NULL) return;
+    double surface = -1.0;
+    Renderer* renderer = gAm2r.runner->renderer;
+    if (N3DSGml_getVar(filter, "mysurf", &surface) && surface >= 0.0 && renderer != NULL) {
+        renderer->vtable->surfaceFree(renderer, (int32_t) surface);
+    }
+    N3DSGml_destroy(filter);
+}
+
+void N3DSAm2r_update(void) {
+    if (!gAm2r.active) return;
+    N3DSAm2r_dropWaterFilter();
+    N3DSAm2r_hideKeyboardRow();
+    if (gAm2r.pageOpen) {
+        N3DSAm2r_updateCheatsPage();
+    } else if (gAm2r.objOptionsDisplay >= 0) {
+        Instance* display = N3DSGml_anyInstance(gAm2r.objOptionsDisplay);
+        if (display != NULL) {
+            N3DSGml_destroy(display);
+            N3DSAm2r_openCheatsPage();
+        }
+    }
+    N3DSAm2r_applyCheats();
+}

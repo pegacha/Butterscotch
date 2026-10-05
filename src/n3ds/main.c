@@ -15,6 +15,7 @@
 #include "n3ds_audio_system.h"
 #include "n3ds_cached_file_system.h"
 #include "n3ds_input.h"
+#include "n3ds_am2r.h"
 #include "n3ds_livemap.h"
 #include "n3ds_pause.h"
 #include "n3ds_platform_config.h"
@@ -644,6 +645,7 @@ int main(int argc, char** argv) {
     N3DSInput_init(runner);
     N3DSPause_init(runner, renderer);
     N3DSLiveMap_init(runner, renderer);
+    N3DSAm2r_init(runner);
     logInfo("Screen mode: %s\n", N3DS_screenModeName(gScreenMode));
     N3DSSavingIndicator savingIndicator = {0};
 #ifdef ENABLE_VM_GML_PROFILER
@@ -704,6 +706,7 @@ int main(int argc, char** argv) {
         bool paused = N3DSPause_update();
         u64 stepStartTick = svcGetSystemTick();
         Runner_step(runner);
+        N3DSAm2r_update();
 #ifdef ENABLE_VM_GML_PROFILER
         if (runner->frameCount > 0 && runner->frameCount % 120 == 0) {
             char* report = Profiler_createReport(vm->profiler, 25, 120);

@@ -69,6 +69,13 @@ movie via `ltm_to_inputs.py`. `-DENABLE_VM_GML_PROFILER=ON` logs a GML profile e
   sprites), centred on Samus's cell (`global.mapposx/y`) with `sMapHilight` and the marker. It is redrawn when Samus
   changes cell and once a second; the finished frame is kept as the bottom-screen picture in between (only the
   highlight is drawn every frame). A tap pauses the game (the pause screen opens on its map page).
+- AM2R adjustments from the front end (`n3ds_am2r.c`; the game's files are unchanged): calls to the game's
+  `get_text`, `get_xjoybtnname` and `get_xjoybtnsprite` go through C hooks that call the game's script and adjust
+  the result (Nintendo button names, A/B and X/Y icons swapped by position, "XBox 360 Joypad" -> "Nintendo 3DS",
+  Display -> Cheats). The Control page's Keyboard row is hidden (`canedit` 0, rows below moved up); the Display
+  page is replaced by a Cheats page built from the game's own row objects (`oMenuLabel`, `oOptionLR`,
+  `oPauseOption`) and driven from C (`oControl.k*`); cheats live in `sdmc:/3ds/am2r/cheats.ini`. The water/lava
+  ripple filter `oWaterFXV2` (a copy of the screen redrawn in 1-pixel strips every frame) is removed.
 - Start+Select toggles the debug monitor (on the top screen while paused). Start and Select reach the game 3 frames
   late, press for press, so the chord is caught before the game sees either.
 - "Saving..." (small, top screen, bottom-right) while the game's files have changes not yet on the SD card.

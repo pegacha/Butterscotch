@@ -5,6 +5,7 @@
 
 #include "../gml_array.h"
 #include "../log.h"
+#include "../utils.h"
 
 #include <math.h>
 #include <string.h>
@@ -15,6 +16,10 @@
 //  - global.dmap[x, y]: 0 unexplored (not drawn), 1 explored, 2 mapped by a map station; 10 / 11 add sMapSP 6 / 7.
 //  - A cell is 8x8; Samus is in cell global.mapposx, global.mapposy, shown by sMapHilight (alpha oControl.malpha);
 //    global.mapmarker / mapmarkerx / mapmarkery is the player's marker (sMapMarker, frame oControl.markfr).
+// Around it, the pause screen's map page (oSS_Fg / draw_surface_map): the bgMapScreenBG grid behind the cells
+// (tiled from cell 3,3), black bands top and bottom, the bg_SubScrBottom bar with the page title, and the
+// bg_MapBottom bar with the play time (steps_to_time2(global.gametime)) and the Metroids left (global.monstersleft,
+// global.monstersarea).
 // The whole map is redrawn when Samus changes cell and once a second (newly explored cells, the marker); the
 // finished frame is kept as the bottom-screen picture for the frames in between, with the highlight drawn on top.
 
@@ -28,6 +33,7 @@ typedef struct {
     Renderer* renderer;
     int32_t sprBlock, sprCorner, sprHLine, sprVLine, sprHPass, sprVPass, sprSP, sprHilight, sprMarker;
     int32_t objControl;
+    int32_t bgGrid, bgTopBar, bgBottomBar, font, scriptTime, scriptText;
     uint32_t frame;
     uint32_t lastDrawCall;
     uint32_t lastRedraw;
@@ -52,6 +58,12 @@ void N3DSLiveMap_init(Runner* runner, Renderer* renderer) {
     gLive.sprHilight = N3DSGml_spriteIndex("sMapHilight");
     gLive.sprMarker = N3DSGml_spriteIndex("sMapMarker");
     gLive.objControl = N3DSGml_objectIndex("oControl");
+    gLive.bgGrid = N3DSGml_backgroundIndex("bgMapScreenBG");
+    gLive.bgTopBar = N3DSGml_backgroundIndex("bg_SubScrBottom");
+    gLive.bgBottomBar = N3DSGml_backgroundIndex("bg_MapBottom");
+    gLive.font = N3DSGml_fontIndex("fontGUI2");
+    gLive.scriptTime = N3DSGml_scriptIndex("steps_to_time2");
+    gLive.scriptText = N3DSGml_scriptIndex("get_text");
     gLive.lastPx = gLive.lastPy = INT32_MIN;
     if (gLive.sprBlock < 0 || gLive.sprCorner < 0 || gLive.sprHLine < 0 || gLive.sprVLine < 0 || gLive.sprHPass < 0 ||
         gLive.sprVPass < 0 || gLive.sprSP < 0) {
@@ -135,10 +147,84 @@ static void N3DSLiveMap_cellOrigin(int32_t cx, int32_t cy, int32_t px, int32_t p
     *y = (float) (N3DS_LIVEMAP_H / 2 - N3DS_LIVEMAP_CELL / 2 + (cy - py) * N3DS_LIVEMAP_CELL);
 }
 
+static void N3DSLiveMap_background(int32_t background, float x, float y, float xscale) {
+    if (background < 0) return;
+    int32_t tpag = Renderer_resolveBackgroundTPAGIndex(gLive.renderer->dataWin, background);
+    if (tpag >= 0) gLive.renderer->vtable->drawSprite(gLive.renderer, tpag, x, y, 0.0f, 0.0f, xscale, 1.0f, 0.0f, 0xFFFFFF, 1.0f);
+}
+
+// draw_text with a black shadow one pixel down-right, as the pause screen does.
+static void N3DSLiveMap_text(const char* text, float x, float y, int32_t halign) {
+    if (text == NULL || text[0] == '\0' || gLive.font < 0) return;
+    Renderer* r = gLive.renderer;
+    r->drawFont = gLive.font;
+    r->drawHalign = halign;
+    r->drawAlpha = 1.0f;
+    r->drawColor = 0x000000;
+    r->vtable->drawText(r, text, x + 1.0f, y + 1.0f, 1.0f, 1.0f, 0.0f, -1.0f);
+    r->drawColor = 0xFFFFFF;
+    r->vtable->drawText(r, text, x, y, 1.0f, 1.0f, 0.0f, -1.0f);
+}
+
+static char* N3DSLiveMap_callText(int32_t script, RValue* args, int32_t argCount) {
+    RValue result = N3DSGml_callScript(script, args, argCount);
+    char* text = result.type == RVALUE_STRING && result.string != NULL ? safeStrdup(result.string) : NULL;
+    RValue_free(&result);
+    return text;
+}
+
+static void N3DSLiveMap_twoDigits(char* out, size_t size, const char* global) {
+    double value = 0.0;
+    N3DSGml_getGlobal(global, -1, &value);
+    snprintf(out, size, "%02d", (int) value);
+}
+
+static void N3DSLiveMap_drawFrame(void) {
+    Renderer* r = gLive.renderer;
+    // The game's draw state is left as it was.
+    int32_t font = r->drawFont, halign = r->drawHalign;
+    uint32_t color = r->drawColor;
+    float alpha = r->drawAlpha;
+    r->vtable->drawRectangle(r, 0.0f, 0.0f, (float) N3DS_LIVEMAP_W, 41.0f, 0x000000, 1.0f, false);
+    r->vtable->drawRectangle(r, 0.0f, 198.0f, (float) N3DS_LIVEMAP_W, (float) N3DS_LIVEMAP_H, 0x000000, 1.0f, false);
+    N3DSLiveMap_background(gLive.bgTopBar, 0.0f, 30.0f, 10.0f);
+    N3DSLiveMap_background(gLive.bgBottomBar, 0.0f, 198.0f, 1.0f);
+    RValue titleArgs[2] = { RValue_makeString("Subscreen"), RValue_makeString("Title_Map") };
+    char* title = gLive.scriptText >= 0 ? N3DSLiveMap_callText(gLive.scriptText, titleArgs, 2) : NULL;
+    N3DSLiveMap_text(title != NULL ? title : "MAP", 160.0f, 29.0f, 1);
+    free(title);
+    double gameTime = 0.0;
+    if (gLive.scriptTime >= 0 && N3DSGml_getGlobal("gametime", -1, &gameTime)) {
+        RValue arg = RValue_makeReal((GMLReal) gameTime);
+        char* time = N3DSLiveMap_callText(gLive.scriptTime, &arg, 1);
+        N3DSLiveMap_text(time, 17.0f, 197.0f, 0);
+        free(time);
+    }
+    char left[8], area[8];
+    N3DSLiveMap_twoDigits(left, sizeof(left), "monstersleft");
+    N3DSLiveMap_twoDigits(area, sizeof(area), "monstersarea");
+    N3DSLiveMap_text(left, 259.0f, 197.0f, 0);
+    N3DSLiveMap_text(area, 303.0f, 197.0f, 0);
+    r->drawFont = font;
+    r->drawHalign = halign;
+    r->drawColor = color;
+    r->drawAlpha = alpha;
+}
+
 static void N3DSLiveMap_drawCells(int32_t px, int32_t py) {
     RValue* map = N3DSLiveMap_array("map");
     RValue* dmap = N3DSLiveMap_array("dmap");
     if (map == NULL || dmap == NULL) return;
+    if (gLive.bgGrid >= 0) {
+        // The pause map's surface starts at cell 3,3 with the grid tiled from its corner.
+        float gx, gy;
+        N3DSLiveMap_cellOrigin(3, 3, px, py, &gx, &gy);
+        int32_t tpag = Renderer_resolveBackgroundTPAGIndex(gLive.renderer->dataWin, gLive.bgGrid);
+        if (tpag >= 0) {
+            Renderer_drawBackgroundTiled(gLive.renderer, tpag, gx, gy, 1.0f, 1.0f, true, true, (float) N3DS_LIVEMAP_W,
+                (float) N3DS_LIVEMAP_H, 0xFFFFFF, 1.0f);
+        }
+    }
     int32_t halfW = N3DS_LIVEMAP_W / N3DS_LIVEMAP_CELL / 2 + 1;
     int32_t halfH = N3DS_LIVEMAP_H / N3DS_LIVEMAP_CELL / 2 + 1;
     for (int32_t cx = px - halfW; cx <= px + halfW; cx++) {
@@ -165,6 +251,7 @@ static void N3DSLiveMap_drawCells(int32_t px, int32_t py) {
         N3DSLiveMap_cellOrigin((int32_t) mx, (int32_t) my, px, py, &x, &y);
         N3DSLiveMap_sprite(gLive.sprMarker, (int32_t) markFrame, x, y, 1.0f);
     }
+    N3DSLiveMap_drawFrame();
 }
 
 static void N3DSLiveMap_drawHighlight(void) {

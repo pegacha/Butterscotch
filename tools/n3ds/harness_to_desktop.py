@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Turn a 3DS harness.txt into a desktop reference run (same frames, keyboard instead of buttons).
+"""Turn a 3DS harness.txt into a desktop reference run (same frames, keyboard instead of buttons; goto -> --goto-room).
 
 usage: harness_to_desktop.py harness.txt out.json  -> prints the extra butterscotch CLI arguments
 """
@@ -25,6 +25,8 @@ for line in open(sys.argv[1]):
         frames.setdefault(str(frame + length), {"keysPressed": [], "keysReleased": []})["keysReleased"].append(key)
     elif parts[0] == "screenshot":
         args += ["--screenshot-at-frame", parts[1]]
+    elif parts[0] == "goto" and len(parts) >= 3:
+        args += ["--goto-room", parts[1] + ":" + parts[2]]
     elif parts[0] == "exit":
         args += ["--exit-at-frame", parts[1]]
 json.dump(frames, open(sys.argv[2], "w"))

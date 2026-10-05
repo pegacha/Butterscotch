@@ -106,6 +106,8 @@ typedef struct {
     bool printDeclaredFunctions;
     bool printUnknownFunctions;
     int exitAtFrame;
+    // --goto-room <frame>:<room>: room changes at those frames (stb_ds array), for screenshots of a room.
+    struct { int frame; const char* room; }* gotoRooms;
 #ifdef ENABLE_VM_TRACING
     int traceBytecodeAfterFrame;
 #endif

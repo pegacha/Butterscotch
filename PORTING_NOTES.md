@@ -33,6 +33,10 @@ pause, walk; `pause.txt`; `explore.txt`); `goto <frame> <room>` and `place <fram
 room to test without playing to it. `inputs.json` = keyboard playback in the desktop `--playback-inputs`
 format with a fixed seed; `tools/n3ds/run_tas.ps1` (and `run_tas.bat`, drag a `.ltm` onto it) replays a libTAS
 movie via `ltm_to_inputs.py`. `-DENABLE_VM_GML_PROFILER=ON` logs a GML profile every 120 frames.
+`tools/n3ds/compare_rooms.py` screenshots every room (`--match`/`--rooms`) on the desktop runner (under Xvfb, with
+`--goto-room`) and in Azahar (Linux AppImage, screen mode 1x), pairs the shots by the room each was really taken in,
+and writes `report.html` ranked by difference (desktop | 3DS | difference). `harness_to_desktop.py` turns `goto`
+into the desktop's `--goto-room <frame>:<room>`.
 
 ## Interface adaptations (Cinnamon fork-era -> upstream)
 

@@ -1110,6 +1110,18 @@ int loop(CommandLineArgs args, const char *argv0) {
                 InputRecording_processFrame(globalInputRecording, runner->keyboard, inputFrameCount++);
             }
 
+            // --goto-room
+            repeat(arrlen(args.gotoRooms), gi) {
+                if (args.gotoRooms[gi].frame != runner->frameCount) continue;
+                DataWin* dw = runner->dataWin;
+                int32_t target = -1;
+                repeat(dw->room.count, ri) {
+                    if (dw->room.rooms[ri].name != nullptr && strcmp(dw->room.rooms[ri].name, args.gotoRooms[gi].room) == 0) target = (int32_t) ri;
+                }
+                if (target >= 0) runner->pendingRoom = target;
+                logInfo("Goto room %s (%d) at frame %d (--goto-room)\n", args.gotoRooms[gi].room, (int) target, (int) runner->frameCount);
+            }
+
             // Go to next room
             if (RunnerKeyboard_checkPressed(runner->keyboard, VK_PAGEUP)) {
                 DataWin* dw = runner->dataWin;

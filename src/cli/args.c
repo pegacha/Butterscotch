@@ -29,6 +29,7 @@ static void printUsage(const char *argv0) {
 #ifdef ENABLE_SCREENSHOTS
         "    --screenshot <filename>                - Specify the filename for screenshots\n"
         "    --screenshot-at-frame <frame>          - Take a screenshot at the specified frame\n"
+        "    --goto-room <frame>:<room>             - Go to the named room at that frame (repeatable; e.g. to screenshot it)\n"
         "    --screenshot-surfaces <filename>       - Take a screenshot of all surfaces at the specified frame\n"
         "    --screenshot-surfaces-at-frame <frame> - Specify the filename for surface screenshots\n"
 #endif
@@ -105,6 +106,7 @@ void parseCommandLineArgs(CommandLineArgs* args, int argc, char* argv[]) {
 #ifdef ENABLE_SCREENSHOTS
         {"screenshot",          required_argument, nullptr, 's'},
         {"screenshot-at-frame", required_argument, nullptr, 'f'},
+        {"goto-room", required_argument, nullptr, 'm'},
         {"screenshot-surfaces", required_argument, nullptr, 'U'},
         {"screenshot-surfaces-at-frame", required_argument, nullptr, 'V'},
 #endif
@@ -172,6 +174,7 @@ void parseCommandLineArgs(CommandLineArgs* args, int argc, char* argv[]) {
 
 #ifdef ENABLE_SCREENSHOTS
     args->screenshotFrames = nullptr;
+    args->gotoRooms = nullptr;
 #endif
     args->exitAtFrame = -1;
 #ifdef ENABLE_VM_TRACING
@@ -203,6 +206,19 @@ void parseCommandLineArgs(CommandLineArgs* args, int argc, char* argv[]) {
             case 'H':
                 printUsage(argv[0]);
                 exit(0);
+            case 'm': {
+                char* colon = strchr(optarg, ':');
+                char* endPtr;
+                int frame = (int) strtol(optarg, &endPtr, 10);
+                if (colon == nullptr || endPtr != colon || 0 > frame || colon[1] == '\0') {
+                    logError("Invalid --goto-room '%s' (expected <frame>:<room>)\n", optarg);
+                    exit(1);
+                }
+                arrsetlen(args->gotoRooms, arrlen(args->gotoRooms) + 1);
+                args->gotoRooms[arrlen(args->gotoRooms) - 1].frame = frame;
+                args->gotoRooms[arrlen(args->gotoRooms) - 1].room = colon + 1;
+                break;
+            }
 #ifdef ENABLE_SCREENSHOTS
             case 's':
                 args->screenshotPattern = optarg;

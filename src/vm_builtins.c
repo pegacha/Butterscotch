@@ -328,6 +328,7 @@ static const BuiltinVarEntry BUILTIN_VAR_TABLE[] = {
     { "delta_time", BUILTIN_VAR_DELTA_TIME },
     { "depth", BUILTIN_VAR_DEPTH },
     { "direction", BUILTIN_VAR_DIRECTION },
+    { "event_data", BUILTIN_VAR_EVENT_DATA },
     { "false", BUILTIN_VAR_FALSE },
     { "fps", BUILTIN_VAR_FPS },
     { "fps_real", BUILTIN_VAR_FPS_REAL },
@@ -688,6 +689,8 @@ RValue VMBuiltins_getVariable(VMContext* ctx, Instance* inst, int16_t builtinVar
             return RValue_makeReal(OS_LLVM_WINPHONE);
         case BUILTIN_VAR_ASYNC_LOAD:
             return RValue_makeReal((GMLReal) runner->asyncLoadMapId);
+        case BUILTIN_VAR_EVENT_DATA:
+            return RValue_makeReal((GMLReal) runner->eventDataMapId);
 
         // Per-instance properties
         case BUILTIN_VAR_IMAGE_SPEED:
@@ -1353,7 +1356,7 @@ void VMBuiltins_setVariable(VMContext* ctx, Instance* inst, int16_t builtinVarId
         }
         case BUILTIN_VAR_IMAGE_ANGLE: {
             if (inst == nullptr) break;
-            float value = (float) RValue_toReal(val);
+            GMLReal value = RValue_toReal(val);
             bool changed = value != inst->imageAngle;
             if (changed) {
                 inst->imageAngle = value;
@@ -5851,6 +5854,29 @@ static RValue builtin_ds_grid_resize(VMContext* ctx, MAYBE_UNUSED RValue* args, 
     return RValue_makeUndefined();
 }
 
+static RValue builtin_ds_grid_copy(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    REQUIRE_ARGC_AT_LEAST("ds_grid_copy", 2, RValue_makeUndefined());
+    DsGrid* dst = dsGridGet(ctx->runner, RValue_toInt32(args[0]));
+    DsGrid* src = dsGridGet(ctx->runner, RValue_toInt32(args[1]));
+    if (dst == nullptr || src == nullptr) return RValue_makeUndefined();
+    for (int32_t i = 0; i < dst->width * dst->height; i++) {
+        RValue_free(&dst->items[i]);
+    }
+    free(dst->items);
+    size_t count = (size_t)src->width * (size_t)src->height;
+    dst->width = src->width;
+    dst->height = src->height;
+    dst->items = count > 0 ? (RValue*)safeCalloc(count, sizeof(RValue)) : nullptr;
+    if (dst->items != nullptr) {
+        {
+        for (size_t i = 0; i < count; i++) {
+            dst->items[i] = RValue_makeIndependent(src->items[i]);
+        }
+        }
+    }
+    return RValue_makeUndefined();
+}
+
 static RValue jsonDecodeValue(VMContext* ctx, JsonValue* json);
 
 static uint8_t* dsHexDecode(const char* hex, int32_t* outLen) {
@@ -7145,6 +7171,41 @@ static RValue builtin_array_sort(MAYBE_UNUSED VMContext* ctx, RValue* args, int3
     }
     free(tmp);
     return RValue_makeUndefined();
+}
+
+static bool arrayElementsEqual(RValue* a, RValue* b) {
+    if (a->type != b->type) return false;
+    if (a->type == RVALUE_ARRAY) {
+        GMLArray* arrA = a->array;
+        GMLArray* arrB = b->array;
+        if (arrA == nullptr || arrB == nullptr) return arrA == arrB;
+        int32_t lenA = GMLArray_length1D(arrA);
+        int32_t lenB = GMLArray_length1D(arrB);
+        if (lenA != lenB) return false;
+        for (int32_t i = 0; i < lenA; i++) {
+            if (!arrayElementsEqual(GMLArray_slot(arrA, i), GMLArray_slot(arrB, i)))
+                return false;
+        }
+        return true;
+    }
+    return rValuesLooselyEqual(*a, *b);
+}
+
+static RValue builtin_array_equals(VMContext* ctx, RValue* args, int32_t argCount) {
+    REQUIRE_ARGC_AT_LEAST("array_equals", 2, RValue_makeBool(false));
+    
+    GMLArray* arr1 = args[0].array;
+    GMLArray* arr2 = args[1].array;
+    if (arr1 == nullptr || arr2 == nullptr) return RValue_makeBool(false);
+    int32_t len1 = GMLArray_length1D(arr1);
+    int32_t len2 = GMLArray_length1D(arr2);
+    if (len1 != len2) return RValue_makeBool(false);
+    for (int32_t i = 0; i < len1; i++) {
+        RValue* slotA = GMLArray_slot(arr1, i);
+        RValue* slotB = GMLArray_slot(arr2, i);
+        if (!arrayElementsEqual(slotA, slotB)) return RValue_makeBool(false);
+    }
+    return RValue_makeBool(true);
 }
 
 // ===[ COLLISION FUNCTIONS]===
@@ -11305,10 +11366,10 @@ static RValue builtin_draw_sprite_part(VMContext* ctx, RValue* args, MAYBE_UNUSE
 
     int32_t spriteIndex = RValue_toInt32(args[0]);
     int32_t subimg = RValue_toInt32(args[1]);
-    int32_t left = RValue_toInt32(args[2]);
-    int32_t top = RValue_toInt32(args[3]);
-    int32_t width = RValue_toInt32(args[4]);
-    int32_t height = RValue_toInt32(args[5]);
+    float left = (float) RValue_toReal(args[2]);
+    float top = (float) RValue_toReal(args[3]);
+    float width = (float) RValue_toReal(args[4]);
+    float height = (float) RValue_toReal(args[5]);
     float x = (float) RValue_toReal(args[6]);
     float y = (float) RValue_toReal(args[7]);
 
@@ -11327,10 +11388,10 @@ static RValue builtin_draw_sprite_part_ext(VMContext* ctx, RValue* args, MAYBE_U
 
     int32_t spriteIndex = RValue_toInt32(args[0]);
     int32_t subimg = RValue_toInt32(args[1]);
-    int32_t left = RValue_toInt32(args[2]);
-    int32_t top = RValue_toInt32(args[3]);
-    int32_t width = RValue_toInt32(args[4]);
-    int32_t height = RValue_toInt32(args[5]);
+    float left = (float) RValue_toReal(args[2]);
+    float top = (float) RValue_toReal(args[3]);
+    float width = (float) RValue_toReal(args[4]);
+    float height = (float) RValue_toReal(args[5]);
     float x = (float) RValue_toReal(args[6]);
     float y = (float) RValue_toReal(args[7]);
     float xscale = (float) RValue_toReal(args[8]);
@@ -11352,10 +11413,10 @@ static RValue builtin_draw_sprite_general(VMContext* ctx, RValue* args, MAYBE_UN
 
     int32_t spriteIndex = RValue_toInt32(args[0]);
     int32_t subimg = RValue_toInt32(args[1]);
-    int32_t left = RValue_toInt32(args[2]);
-    int32_t top = RValue_toInt32(args[3]);
-    int32_t width = RValue_toInt32(args[4]);
-    int32_t height = RValue_toInt32(args[5]);
+    float left = (float) RValue_toReal(args[2]);
+    float top = (float) RValue_toReal(args[3]);
+    float width = (float) RValue_toReal(args[4]);
+    float height = (float) RValue_toReal(args[5]);
     float x = (float) RValue_toReal(args[6]);
     float y = (float) RValue_toReal(args[7]);
     float xscale = (float) RValue_toReal(args[8]);
@@ -11825,10 +11886,10 @@ static RValue builtin_draw_background_part(VMContext* ctx, RValue* args, MAYBE_U
     if (runner->renderer == nullptr) return RValue_makeUndefined();
 
     int32_t bgIndex = RValue_toInt32(args[0]);
-    int32_t left = RValue_toInt32(args[1]);
-    int32_t top = RValue_toInt32(args[2]);
-    int32_t width = RValue_toInt32(args[3]);
-    int32_t height = RValue_toInt32(args[4]);
+    float left = (float) RValue_toReal(args[1]);
+    float top = (float) RValue_toReal(args[2]);
+    float width = (float) RValue_toReal(args[3]);
+    float height = (float) RValue_toReal(args[4]);
     float x = (float) RValue_toReal(args[5]);
     float y = (float) RValue_toReal(args[6]);
 
@@ -11845,10 +11906,10 @@ static RValue builtin_draw_background_part_ext(VMContext* ctx, RValue* args, MAY
     if (runner->renderer == nullptr) return RValue_makeUndefined();
 
     int32_t bgIndex = RValue_toInt32(args[0]);
-    int32_t left = RValue_toInt32(args[1]);
-    int32_t top = RValue_toInt32(args[2]);
-    int32_t width = RValue_toInt32(args[3]);
-    int32_t height = RValue_toInt32(args[4]);
+    float left = (float) RValue_toReal(args[1]);
+    float top = (float) RValue_toReal(args[2]);
+    float width = (float) RValue_toReal(args[3]);
+    float height = (float) RValue_toReal(args[4]);
     float x = (float) RValue_toReal(args[5]);
     float y = (float) RValue_toReal(args[6]);
     float xscale = (float) RValue_toReal(args[7]);
@@ -11917,6 +11978,12 @@ static RValue builtin_background_get_height(VMContext* ctx, RValue* args, MAYBE_
     int32_t tpagIndex = Renderer_resolveBackgroundTPAGIndex(ctx->dataWin, bgIndex);
     if (0 > tpagIndex) return RValue_makeReal(0.0);
     return RValue_makeReal((GMLReal) ctx->dataWin->tpag.items[tpagIndex].boundingHeight);
+}
+
+static RValue builtin_draw_enable_drawevent(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    REQUIRE_ARGC_AT_LEAST("draw_enable_drawevent", 1, RValue_makeUndefined());
+    ctx->runner->drawEnabled = RValue_toBool(args[0]);
+    return RValue_makeUndefined();
 }
 
 static RValue builtin_draw_self(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
@@ -12438,6 +12505,49 @@ static RValue builtin_surface_resize(VMContext* ctx, RValue* args, MAYBE_UNUSED 
     }
     runner->renderer->vtable->surfaceResize(runner->renderer, surfaceId, w, h);
     return RValue_makeUndefined();
+}
+
+static RValue builtin_surface_getpixel(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = ctx->runner;
+    
+    int32_t surfaceId = (int32_t) RValue_toReal(args[0]);
+    int32_t x = (int32_t) RValue_toReal(args[1]);
+    int32_t y = (int32_t) RValue_toReal(args[2]);
+    int32_t w = (int32_t) Renderer_getSurfaceWidth(runner->renderer, surfaceId);
+    int32_t h = (int32_t) Renderer_getSurfaceHeight(runner->renderer, surfaceId);
+    if (x < 0 || x >= w || y < 0 || y >= h) return RValue_makeInt32(0);
+    
+    uint8_t* surfacePixels = (uint8_t*)safeMalloc((size_t)w * (size_t)h * 4);
+    if (!runner->renderer->vtable->surfaceGetPixels(runner->renderer, surfaceId, surfacePixels)) {
+        free(surfacePixels);
+        return RValue_makeInt32(0);
+    }
+    uint8_t* p = surfacePixels + (((h - 1 - y) * w) + x) * 4;
+    uint32_t bgr = p[0] | (p[1] << 8) | (p[2] << 16);
+    free(surfacePixels);
+    
+    return RValue_makeInt32(bgr);
+}
+
+static RValue builtin_surface_getpixel_ext(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = ctx->runner;
+    int32_t surfaceId = (int32_t) RValue_toReal(args[0]);
+    int32_t x = (int32_t) RValue_toReal(args[1]);
+    int32_t y = (int32_t) RValue_toReal(args[2]);
+    int32_t w = (int32_t) Renderer_getSurfaceWidth(runner->renderer, surfaceId);
+    int32_t h = (int32_t) Renderer_getSurfaceHeight(runner->renderer, surfaceId);
+    if (x < 0 || x >= w || y < 0 || y >= h) return RValue_makeReal(0.0);
+    
+    uint8_t* surfacePixels = (uint8_t*)safeMalloc((size_t)w * (size_t)h * 4);
+    if (!runner->renderer->vtable->surfaceGetPixels(runner->renderer, surfaceId, surfacePixels)) {
+        free(surfacePixels);
+        return RValue_makeReal(0.0);
+    }
+    uint8_t* p = surfacePixels + (((h - 1 - y) * w) + x) * 4;
+    uint32_t abgr = p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24);
+    free(surfacePixels);
+    
+    return RValue_makeReal((GMLReal)abgr);
 }
 
 static RValue builtin_surface_copy_part(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
@@ -14364,6 +14474,41 @@ static RValue builtin_date_set_timezone(VMContext* ctx, RValue* args, int32_t ar
 
 static RValue builtin_date_get_timezone(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     return RValue_makeReal(ctx->runner->dateTimeLocal ? 0.0 : 1.0);
+}
+
+static const char* dateOrdinalSuffix(int day) {
+    if (day >= 11 && day <= 13) {
+        return "th";
+    }
+    switch (day % 10) {
+        case 1:  return "st";
+        case 2:  return "nd";
+        case 3:  return "rd";
+        default: return "th";
+    }
+}
+
+static RValue builtin_date_datetime_string(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    struct tm parts;
+    
+    if (!dateGetParts(ctx, args[0], &parts)) return RValue_makeString("");
+    
+    char month[64];
+    if (strftime(month, sizeof(month), "%B", &parts) == 0) return RValue_makeString("");
+    
+    char fullDate[256];
+    int written = snprintf(fullDate, sizeof(fullDate), "%s %d%s %d, %02d:%02d.%02d",
+                           month,
+                           parts.tm_mday,
+                           dateOrdinalSuffix(parts.tm_mday),
+                           parts.tm_year + 1900,
+                           parts.tm_hour,
+                           parts.tm_min,
+                           parts.tm_sec);
+                           
+    if (written < 0 || (size_t)written >= sizeof(fullDate)) return RValue_makeString("");
+    
+    return RValue_makeOwnedString(fullDate);
 }
 
 static RValue builtin_action_set_alarm(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
@@ -22807,6 +22952,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "ds_grid_get", builtin_ds_grid_get);
     VM_registerBuiltin(ctx, "ds_grid_add", builtin_ds_grid_add);
     VM_registerBuiltin(ctx, "ds_grid_resize", builtin_ds_grid_resize);
+    VM_registerBuiltin(ctx, "ds_grid_copy", builtin_ds_grid_copy);
     VM_registerBuiltin(ctx, "ds_grid_read", builtin_ds_grid_read);
     VM_registerBuiltin(ctx, "ds_grid_write", builtin_ds_grid_write);
 
@@ -22872,6 +23018,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "array_create", builtin_array_create);
     VM_registerBuiltin(ctx, "array_copy", builtin_array_copy);
     VM_registerBuiltin(ctx, "array_sort", builtin_array_sort);
+    VM_registerBuiltin(ctx, "array_equals", builtin_array_equals);    
 
     // Steam stubs
     VM_registerBuiltin(ctx, "steam_initialised", builtin_steam_initialised);
@@ -23216,6 +23363,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
         VM_registerBuiltin(ctx, "background_get_name", builtin_sprite_get_name);
         VM_registerBuiltin(ctx, "background_name", builtin_sprite_get_name);
     }
+    VM_registerBuiltin(ctx, "draw_enable_drawevent", builtin_draw_enable_drawevent);
     VM_registerBuiltin(ctx, "draw_self", builtin_draw_self);
     VM_registerBuiltin(ctx, "draw_point", builtin_draw_point);
     VM_registerBuiltin(ctx, "draw_point_color", builtin_draw_point_color);
@@ -23269,6 +23417,8 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "surface_set_target", builtin_surface_set_target);
     VM_registerBuiltin(ctx, "surface_reset_target", builtin_surface_reset_target);
     VM_registerBuiltin(ctx, "surface_get_target", builtin_surface_get_target);
+    VM_registerBuiltin(ctx, "surface_getpixel", builtin_surface_getpixel);
+    VM_registerBuiltin(ctx, "surface_getpixel_ext", builtin_surface_getpixel_ext);
     VM_registerBuiltin(ctx, "surface_exists", builtin_surface_exists);
     VM_registerBuiltin(ctx, "surface_get_width", builtin_surface_get_width);
     VM_registerBuiltin(ctx, "surface_get_height", builtin_surface_get_height);
@@ -23694,6 +23844,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "date_get_second", builtin_date_get_second);
     VM_registerBuiltin(ctx, "date_set_timezone", builtin_date_set_timezone);
     VM_registerBuiltin(ctx, "date_get_timezone", builtin_date_get_timezone);
+    VM_registerBuiltin(ctx, "date_datetime_string", builtin_date_datetime_string);    
     if (!isGMS2) {
         VM_registerBuiltin(ctx, "action_if_variable", builtin_action_if_variable);
         VM_registerBuiltin(ctx, "action_if", builtin_action_if);

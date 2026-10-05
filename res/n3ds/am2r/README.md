@@ -1,6 +1,6 @@
-Optional HOME Menu art for the AM2R build, picked up by cmake/n3ds.cmake when present:
-`icon.png` (48x48), `banner.png` (256x128) and `banner.wav` (both needed for a banner).
-Without them the title uses libctru's default homebrew icon and no banner.
+HOME Menu art for the AM2R build, picked up by cmake/n3ds.cmake: `icon.png` (48x48, the Metroid icon) and
+`banner.png` (256x128, the AM2R logo) with `banner.wav` (half a second of silence; a banner needs a sound).
+Without them the title gets libctru's default homebrew icon and no banner (bannertool is needed for the banner).
 
 `sd/` holds files installed on the SD card by `tools/n3ds/make_sd.sh` only when the card doesn't have them yet:
 `config.ini` is AM2R's control config with a 3DS layout (Samus Returns style). The game's own Joypad menu still

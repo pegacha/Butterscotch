@@ -31,8 +31,10 @@ jobs:
         # A container job's default shell is sh.
         shell: bash
     env:
-      # makerom (CIA packaging) isn't part of devkitPro: built from 3DSGuy/Project_CTR at this tag.
+      # makerom (CIA packaging) and bannertool (HOME Menu banner) aren't part of devkitPro: built from
+      # 3DSGuy/Project_CTR and diasurgical/bannertool at these tags.
       MAKEROM_REF: makerom-v0.19.0
+      BANNERTOOL_REF: "1.2.0"
     steps:
       - uses: actions/checkout@v7
 
@@ -43,17 +45,20 @@ jobs:
           echo "hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           echo "date=$(git log -1 --format=%cd --date=format:'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
 
-      - name: Build makerom
+      - name: Build makerom and bannertool
         run: |
           git clone --quiet --depth 1 --branch "$MAKEROM_REF" https://github.com/3DSGuy/Project_CTR.git /opt/project_ctr
           make -C /opt/project_ctr/makerom deps
           make -C /opt/project_ctr/makerom program
-          test -x /opt/project_ctr/makerom/bin/makerom
+          git clone --quiet --depth 1 --branch "$BANNERTOOL_REF" --recursive https://github.com/diasurgical/bannertool.git /opt/bannertool
+          make -C /opt/bannertool
+          mkdir -p /opt/n3ds-tools
+          cp /opt/project_ctr/makerom/bin/makerom /opt/bannertool/output/linux-x86_64/bannertool /opt/n3ds-tools/
 
       - name: Build
         run: |
           tools/n3ds/build.sh build \
-            -DN3DS_TOOLS_DIR=/opt/project_ctr/makerom/bin \
+            -DN3DS_TOOLS_DIR=/opt/n3ds-tools \
             "-DBUTTERSCOTCH_COMMIT_HASH=${{ steps.commit-info.outputs.hash }}" \
             "-DBUTTERSCOTCH_COMMIT_DATE=${{ steps.commit-info.outputs.date }}"
           mkdir -p out

@@ -3496,6 +3496,10 @@ static RValue builtin_random_set_seed(MAYBE_UNUSED VMContext* ctx, RValue* args,
     return RValue_makeUndefined();
 }
 
+static RValue builtin_random_get_seed(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeReal((GMLReal) ctx->runner->random.seed);
+}
+
 static RValue builtin_random(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
     REQUIRE_ARGC_AT_LEAST("random", 1, RValue_makeReal(0.0));
     GMLReal n = RValue_toReal(args[0]);
@@ -8554,6 +8558,34 @@ static RValue builtin_file_text_open_write(VMContext* ctx, RValue* args, int32_t
     return RValue_makeReal((GMLReal) slot);
 }
 
+// file_text_open_append(fname): like file_text_open_write, but keeps what the file already holds.
+static RValue builtin_file_text_open_append(VMContext* ctx, RValue* args, int32_t argCount) {
+    REQUIRE_ARGC_AT_LEAST("file_text_open_append", 1, RValue_makeReal(-1.0));
+    const char* path = (args[0].type == RVALUE_STRING ? args[0].string : "");
+    Runner* runner = ctx->runner;
+    FileSystem* fs = runner->fileSystem;
+
+    int32_t slot = findFreeTextFileSlot(runner);
+    if (0 > slot) {
+        logError("Too many open text files!\n");
+        abort();
+    }
+
+    char* existing = fs->vtable->readFileText(fs, path);
+
+    OpenTextFile file = {0};
+    file.content = nullptr;
+    file.writeBuffer = existing != nullptr ? existing : safeStrdup("");
+    file.filePath = safeStrdup(path);
+    file.readPos = 0;
+    file.contentLen = 0;
+    file.isWriteMode = true;
+    file.isOpen = true;
+    runner->openTextFiles[slot] = file;
+
+    return RValue_makeReal((GMLReal) slot);
+}
+
 static RValue builtin_file_text_close(VMContext* ctx, RValue* args, int32_t argCount) {
     REQUIRE_ARGC_AT_LEAST("file_text_close", 1, RValue_makeUndefined());
     Runner* runner = ctx->runner;
@@ -9013,6 +9045,12 @@ static RValue builtin_keyboard_clear(VMContext* ctx, RValue* args, int32_t argCo
     return RValue_makeUndefined();
 }
 
+// io_clear(): clears the keyboard state (GameMaker also clears the mouse, which nothing here keeps between frames).
+static RValue builtin_io_clear(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    RunnerKeyboard_clear(ctx->runner->keyboard, VK_ANYKEY);
+    return RValue_makeUndefined();
+}
+
 static RValue builtin_keyboard_set_map(VMContext* ctx, RValue* args, int32_t argCount) {
     REQUIRE_ARGC_AT_LEAST("keyboard_set_map", 2, RValue_makeUndefined());
     Runner* runner = ctx->runner;
@@ -9209,6 +9247,28 @@ static RValue builtin_joystick_axes(VMContext* ctx, RValue* args, MAYBE_UNUSED i
 // Window stubs
 STUB_RETURN_ZERO(window_get_fullscreen)
 STUB_RETURN_UNDEFINED(window_set_fullscreen)
+
+// application_get_position(): [x1, y1, x2, y2] of the application surface in the window. The runner draws it over
+// the whole window.
+static RValue builtin_application_get_position(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = ctx->runner;
+    int32_t w = (int32_t) ctx->dataWin->gen8.defaultWindowWidth;
+    int32_t h = (int32_t) ctx->dataWin->gen8.defaultWindowHeight;
+    if (runner != nullptr && runner->getWindowSize != nullptr) {
+        int32_t ww = 0;
+        int32_t wh = 0;
+        if (runner->getWindowSize(&ww, &wh)) {
+            w = ww;
+            h = wh;
+        }
+    }
+    GMLArray* out = GMLArray_create(ctx->dataWin, 4);
+    GMLArray_set(out, 0, RValue_makeReal(0.0));
+    GMLArray_set(out, 1, RValue_makeReal(0.0));
+    GMLArray_set(out, 2, RValue_makeReal((GMLReal) w));
+    GMLArray_set(out, 3, RValue_makeReal((GMLReal) h));
+    return RValue_makeArray(out);
+}
 
 static RValue builtin_window_get_width(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     Runner* runner = ctx->runner;
@@ -15269,6 +15329,35 @@ static RValue builtin_tile_set_alpha(VMContext* ctx, RValue* args, MAYBE_UNUSED 
         return RValue_makeUndefined();
     }
     logWarn("VM: tile_set_alpha: tile does not exist (%u)\n", id);
+    return RValue_makeUndefined();
+}
+
+static RoomTile* findRoomTileById(Runner* runner, uint32_t id) {
+    Room* room = runner->currentRoom;
+    if (room == nullptr) return nullptr;
+    repeat(room->tileCount, i) {
+        if (room->tiles[i].instanceID == id) return &room->tiles[i];
+    }
+    return nullptr;
+}
+
+// tile_get_background(id) - the background asset the tile is cut from (-1 if there is no such tile).
+static RValue builtin_tile_get_background(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    RoomTile* tile = findRoomTileById(ctx->runner, (uint32_t) RValue_toInt32(args[0]));
+    if (tile == nullptr) return RValue_makeReal(-1.0);
+    return RValue_makeReal((GMLReal) tile->backgroundDefinition);
+}
+
+// tile_set_scale(id, xscale, yscale)
+static RValue builtin_tile_set_scale(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    uint32_t id = (uint32_t) RValue_toInt32(args[0]);
+    RoomTile* tile = findRoomTileById(ctx->runner, id);
+    if (tile == nullptr) {
+        logWarn("VM: tile_set_scale: tile does not exist (%u)\n", id);
+        return RValue_makeUndefined();
+    }
+    tile->scaleX = (float) RValue_toReal(args[1]);
+    tile->scaleY = (float) RValue_toReal(args[2]);
     return RValue_makeUndefined();
 }
 
@@ -22784,6 +22873,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "matrix_set", builtin_matrix_set);
     // Random
     VM_registerBuiltin(ctx, "random_set_seed", builtin_random_set_seed);
+    VM_registerBuiltin(ctx, "random_get_seed", builtin_random_get_seed);
     VM_registerBuiltin(ctx, "random", builtin_random);
     VM_registerBuiltin(ctx, "random_range", builtin_random_range);
     VM_registerBuiltin(ctx, "irandom", builtin_irandom);
@@ -23126,6 +23216,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     // File
     VM_registerBuiltin(ctx, "file_exists", builtin_file_exists);
     VM_registerBuiltin(ctx, "file_text_open_write", builtin_file_text_open_write);
+    VM_registerBuiltin(ctx, "file_text_open_append", builtin_file_text_open_append);
     VM_registerBuiltin(ctx, "file_text_open_read", builtin_file_text_open_read);
     VM_registerBuiltin(ctx, "file_text_close", builtin_file_text_close);
     VM_registerBuiltin(ctx, "file_text_write_string", builtin_file_text_write_string);
@@ -23158,6 +23249,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "keyboard_key_press", builtin_keyboard_key_press);
     VM_registerBuiltin(ctx, "keyboard_key_release", builtin_keyboard_key_release);
     VM_registerBuiltin(ctx, "keyboard_clear", builtin_keyboard_clear);
+    VM_registerBuiltin(ctx, "io_clear", builtin_io_clear);
     VM_registerBuiltin(ctx, "keyboard_set_map", builtin_keyboard_set_map);
     VM_registerBuiltin(ctx, "keyboard_get_map", builtin_keyboard_get_map);
     VM_registerBuiltin(ctx, "keyboard_unset_map", builtin_keyboard_unset_map);
@@ -23190,6 +23282,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "window_set_caption", builtin_window_set_caption);
     VM_registerBuiltin(ctx, "window_get_caption", builtin_window_get_caption);
     VM_registerBuiltin(ctx, "window_get_width", builtin_window_get_width);
+    VM_registerBuiltin(ctx, "application_get_position", builtin_application_get_position);
     VM_registerBuiltin(ctx, "window_get_height", builtin_window_get_height);
     VM_registerBuiltin(ctx, "window_set_size", builtin_window_set_size);
     VM_registerBuiltin(ctx, "window_center", builtin_window_center);
@@ -23528,6 +23621,8 @@ void VMBuiltins_registerAll(VMContext* ctx) {
         VM_registerBuiltin(ctx, "tile_delete", builtin_tile_delete);
         VM_registerBuiltin(ctx, "tile_get_ids_at_depth", builtin_tile_get_ids_at_depth);
         VM_registerBuiltin(ctx, "tile_set_alpha", builtin_tile_set_alpha);
+        VM_registerBuiltin(ctx, "tile_set_scale", builtin_tile_set_scale);
+        VM_registerBuiltin(ctx, "tile_get_background", builtin_tile_get_background);
         VM_registerBuiltin(ctx, "tile_set_visible", builtin_layer_tile_visible);
     }
 

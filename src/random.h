@@ -6,6 +6,7 @@
 typedef struct {
     uint32_t state[16];
     uint32_t index;
+    uint32_t seed; // last seed set (random_get_seed)
 } Random;
 
 void Random_setSeed(Random* m, uint32_t seed);

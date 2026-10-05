@@ -4,6 +4,7 @@
 #include "random.h"
 
 void Random_setSeed(Random* m, uint32_t seed) {
+    m->seed = seed;
     m->state[0] = seed;
     for (int i = 1; 16 > i; ++i)
         m->state[i] = i + 0x6C078965 * (m->state[i - 1] ^ (m->state[i - 1] >> 30));

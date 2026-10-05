@@ -1,6 +1,7 @@
 # Nintendo 3DS port (PLATFORM=n3ds)
 
-Branch `port/n3ds`, from upstream `main` at `d8575ec`. 3DS backend from
+From upstream [ButterscotchRunner/Butterscotch](https://github.com/ButterscotchRunner/Butterscotch) `main` at `d8575ec`
+(this repository's `main` was the `port/n3ds` branch). 3DS backend from
 [Project-Sunshine-Native/cinnamon](https://github.com/Project-Sunshine-Native/cinnamon) `UNDERTALE-3DS` (`f139a60`).
 First target: AM2R 1.1 (WAD 14), New 3DS (804 MHz, L2 cache, 124 MB mode, core 2).
 
@@ -20,7 +21,7 @@ CI (`.github/workflows/build-n3ds.yml`): every push builds the AM2R profile in t
 (makerom built from 3DSGuy/Project_CTR at a pinned tag) and uploads `am2r.cia`, `am2r.3dsx` and `am2r.elf` as the
 `am2r-3ds` artifact. Every passing run except pull requests is also a GitHub release with those files and a QR code
 of the CIA's download link for FBI (Remote Install -> Scan QR Code): branch pushes as `am2r-3ds-b<run number>`
-(pre-releases except on `port/n3ds`, so `releases/latest/download/am2r.cia` is the newest `port/n3ds` build), pushed
+(pre-releases except on `main`, so `releases/latest/download/am2r.cia` is the newest `main` build), pushed
 tags and releases made on GitHub under their own tag.
 
 Emulator loop (Windows host, WSL build): `tools/n3ds/run_in_azahar.ps1` installs the CIA into Azahar (New 3DS mode,

@@ -2,8 +2,8 @@ name: Build (Nintendo 3DS)
 
 # Builds the AM2R 3DS program (tools/n3ds/build.sh). Every passing run except pull requests is published as a
 # GitHub release with am2r.cia, am2r.3dsx, the ELF (for symbolizing crashes) and a QR code for FBI's Remote
-# Install: branch pushes as am2r-3ds-b<run number> (pre-releases except on port/n3ds, so releases/latest is the
-# newest port/n3ds build), pushed tags and releases made on GitHub under their own tag.
+# Install: branch pushes as am2r-3ds-b<run number> (pre-releases except on main, so releases/latest is the
+# newest main build), pushed tags and releases made on GitHub under their own tag.
 
 on:
   push:
@@ -72,7 +72,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_BRANCH: port/n3ds
+          RELEASE_BRANCH: main
         run: |
           apt-get update
           apt-get install -y --no-install-recommends gh qrencode

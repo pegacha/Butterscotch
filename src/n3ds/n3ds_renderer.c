@@ -2243,7 +2243,14 @@ static void N3DSRenderer_transformScreenRect(
     *outH = fabsf(screenY1 - screenY0);
 }
 
+static void N3DSRenderer_drawImageFastFlipped(Renderer* base, C2D_Image* image, float localX, float localY, float xscale, float yscale, bool flipX, bool flipY, uint32_t color, float alpha);
+
 static void N3DSRenderer_drawImageFast(Renderer* base, C2D_Image* image, float localX, float localY, float xscale, float yscale, uint32_t color, float alpha) {
+    N3DSRenderer_drawImageFastFlipped(base, image, localX, localY, xscale, yscale, false, false, color, alpha);
+}
+
+// flipX/flipY mirror the image inside the same rectangle (citro2d: a negative scale swaps the texcoords).
+static void N3DSRenderer_drawImageFastFlipped(Renderer* base, C2D_Image* image, float localX, float localY, float xscale, float yscale, bool flipX, bool flipY, uint32_t color, float alpha) {
     if (image == NULL || image->tex == NULL || image->subtex == NULL) return;
     if (!Renderer_isFiniteFloat(localX) || !Renderer_isFiniteFloat(localY) ||
         !Renderer_isFiniteFloat(xscale) || !Renderer_isFiniteFloat(yscale) ||
@@ -2266,12 +2273,14 @@ static void N3DSRenderer_drawImageFast(Renderer* base, C2D_Image* image, float l
     N3DSRenderer_trackTextureUse(renderer, image);
     N3DSRenderer_applyTextureFilterForScale(renderer, image->tex, screenScaleX, screenScaleY);
 
+    float drawScaleX = flipX ? -screenScaleX : screenScaleX;
+    float drawScaleY = flipY ? -screenScaleY : screenScaleY;
     if (N3DSRenderer_isIdentityTint(color, alpha)) {
-        C2D_DrawImageAt(*image, screenX, screenY, 0.5f, NULL, screenScaleX, screenScaleY);
+        C2D_DrawImageAt(*image, screenX, screenY, 0.5f, NULL, drawScaleX, drawScaleY);
     } else {
         C2D_ImageTint tint;
         C2D_PlainImageTint(&tint, N3DSRenderer_makeColor(color, alpha), 1.0f);
-        C2D_DrawImageAt(*image, screenX, screenY, 0.5f, &tint, screenScaleX, screenScaleY);
+        C2D_DrawImageAt(*image, screenX, screenY, 0.5f, &tint, drawScaleX, drawScaleY);
     }
     N3DSRenderer_noteC2DDraws(renderer, 1u);
 }
@@ -3717,27 +3726,15 @@ static void N3DSRenderer_drawImage(Renderer* base, C2D_Image* image, float local
         flipY = true;
     }
 
-    Tex3DS_SubTexture flippedSubtex;
+    // Flips go to citro2d as negative sizes (it swaps the texcoords). Swapping the subtexture's edges instead broke
+    // vertical flips: a subtexture whose top is below its bottom means "stored rotated" to tex3ds/citro2d, so a
+    // yscale -1 sprite came out turned 90 degrees (AM2R's rm_a5c07 machine, drawn as mirrored halves).
     C2D_Image drawImage = *image;
-    if (flipX || flipY) {
-        flippedSubtex = *image->subtex;
-        if (flipX) {
-            float tmp = flippedSubtex.left;
-            flippedSubtex.left = flippedSubtex.right;
-            flippedSubtex.right = tmp;
-        }
-        if (flipY) {
-            float tmp = flippedSubtex.top;
-            flippedSubtex.top = flippedSubtex.bottom;
-            flippedSubtex.bottom = tmp;
-        }
-        drawImage.subtex = &flippedSubtex;
-    }
 
     if (fabsf(angleDeg) < 0.001f && fabsf(pivotX) < 0.001f && fabsf(pivotY) < 0.001f) {
         float xscale = width / (float) drawImage.subtex->width;
         float yscale = height / (float) drawImage.subtex->height;
-        N3DSRenderer_drawImageFast(base, &drawImage, localX, localY, xscale, yscale, color, alpha);
+        N3DSRenderer_drawImageFastFlipped(base, &drawImage, localX, localY, xscale, yscale, flipX, flipY, color, alpha);
         return;
     }
 
@@ -3762,7 +3759,7 @@ static void N3DSRenderer_drawImage(Renderer* base, C2D_Image* image, float local
     float screenPivotY = (height != 0.0f) ? (pivotY / height) * screenRectH : 0.0f;
 
     C2D_DrawParams params = {
-        .pos = { screenX, screenY, screenRectW, screenRectH },
+        .pos = { screenX, screenY, flipX ? -screenRectW : screenRectW, flipY ? -screenRectH : screenRectH },
         .center = { screenPivotX, screenPivotY },
         .depth = 0.5f,
         .angle = C3D_AngleFromDegrees(-angleDeg),
@@ -4394,10 +4391,16 @@ static void N3DSRenderer_drawTiled(Renderer* base, int32_t tpagIndex, float orig
         cropH = (int32_t) directImage->subtex->height;
     }
 
+    // The image repeats at its full size (the TPAG's bounding box), as GameMaker and the GL renderer do: GameMaker
+    // stores a background trimmed of its transparent margins (AM2R's bgA0Cave4FG: 114 of 212 px wide, at x 2), and
+    // repeating the stored part edge to edge left no gaps (the layer behind never showed). The stored pixels go at
+    // their target offset in each repeat.
     float axScale = fabsf(xscale);
     float ayScale = fabsf(yscale);
-    float tileW = (float) cropW * axScale;
-    float tileH = (float) cropH * ayScale;
+    float periodW = tpag->boundingWidth > 0 ? (float) tpag->boundingWidth : (float) cropW;
+    float periodH = tpag->boundingHeight > 0 ? (float) tpag->boundingHeight : (float) cropH;
+    float tileW = periodW * axScale;
+    float tileH = periodH * ayScale;
     if (tileW <= 0.0f || tileH <= 0.0f) return;
 
     float startX;
@@ -4421,8 +4424,8 @@ static void N3DSRenderer_drawTiled(Renderer* base, int32_t tpagIndex, float orig
         endY = startY + tileH;
     }
 
-    float dxLocalX0 = (float) cropX * xscale + originX * (axScale - xscale);
-    float dyLocalY0 = (float) cropY * yscale + originY * (ayScale - yscale);
+    float dxLocalX0 = ((float) cropX + (float) tpag->targetX) * xscale + originX * (axScale - xscale);
+    float dyLocalY0 = ((float) cropY + (float) tpag->targetY) * yscale + originY * (ayScale - yscale);
     float tileGameW = (float) cropW * xscale;
     float tileGameH = (float) cropH * yscale;
 
@@ -5822,9 +5825,21 @@ static void N3DSRenderer_gpuSetBlendMode(Renderer* base, int32_t mode) {
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     N3DSRenderer_flushC2DQueue(renderer);
     renderer->blendEnabled = true;
-    renderer->blendEquation = mode;
-    renderer->blendSrcFactor = bm_src_alpha;
-    renderer->blendDstFactor = (mode == bm_add) ? bm_one : bm_inv_src_alpha;
+    // GameMaker's blend modes (GameMaker-HTML5 draw_set_blend_mode, and the GL renderer's GLCommon tables): bm_subtract
+    // and bm_max aren't the GPU's subtract/max equations but factor pairs with an add (bm_subtract = dest x (1 - src
+    // colour): AM2R's light engine darkens dark rooms with it; with a real subtract they came out wrong).
+    int32_t equation = bm_normal, src = bm_src_alpha, dst = bm_inv_src_alpha;
+    switch (mode) {
+        case bm_add: dst = bm_one; break;
+        case bm_subtract: src = bm_zero; dst = bm_inv_src_color; break;
+        case bm_max: dst = bm_inv_src_color; break;
+        case bm_reverse_subtract: equation = bm_reverse_subtract; dst = bm_one; break;
+        case bm_min: equation = bm_min; src = bm_one; dst = bm_one; break;
+        default: break;
+    }
+    renderer->blendEquation = equation;
+    renderer->blendSrcFactor = src;
+    renderer->blendDstFactor = dst;
     renderer->blendSrcAlphaFactor = renderer->blendSrcFactor;
     renderer->blendDstAlphaFactor = renderer->blendDstFactor;
     renderer->blendMode = mode;

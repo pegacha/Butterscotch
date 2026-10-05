@@ -174,6 +174,11 @@ typedef struct {
     N3DSAsyncStreamFill asyncFill;
     u64 playbackStartTick;
     u64 playbackReleaseTick;
+    // audio_sound_gain(..., time): gain moves from fadeFrom to fadeTo over fadeTicks (0 = no fade running).
+    float fadeFrom;
+    float fadeTo;
+    u64 fadeStartTick;
+    u64 fadeTicks;
 } N3DSSoundInstance;
 
 typedef struct {
@@ -242,6 +247,7 @@ static uint32_t gN3DSMissingAudioPathCount = 0;
 
 static void N3DSAudio_cancelAsyncFillLocked(N3DSAudioSystem* audio, N3DSSoundInstance* inst);
 static bool N3DSAudio_hasActiveStreamPlaybackLocked(const N3DSAudioSystem* audio);
+static void N3DSAudio_updateFadeLocked(N3DSAudioSystem* audio, N3DSSoundInstance* inst, u64 nowTick);
 static char* N3DSAudio_tryResolveSfxCandidate(N3DSAudioSystem* audio, const char* candidate);
 
 static void N3DSAudio_captureFillCursor(const N3DSSoundInstance* inst, N3DSStreamFillCursor* cursor) {
@@ -2963,6 +2969,7 @@ static void N3DSAudio_update(AudioSystem* base, MAYBE_UNUSED float deltaTime) {
     repeat(N3DS_MAX_SOUND_INSTANCES, i) {
         N3DSSoundInstance* inst = &audio->instances[i];
         if (!inst->active) continue;
+        if (!inst->paused) N3DSAudio_updateFadeLocked(audio, inst, nowTick);
 
         if (!inst->isStream) {
             bool finished = N3DSAudio_nonStreamPlaybackFinished(inst, nowTick);
@@ -3431,8 +3438,38 @@ static void N3DSAudio_resumeAll(AudioSystem* base) {
     LightLock_Unlock(&audio->lock);
 }
 
-static void N3DSAudio_setSoundGain(AudioSystem* base, int32_t soundOrInstance, float gain, MAYBE_UNUSED uint32_t timeMs) {
+// Sets an instance's gain now (timeMs 0) or starts a fade to it from the current gain (AM2R fades music in and out over
+// 3 s with audio_sound_gain).
+static void N3DSAudio_setInstanceGainLocked(N3DSAudioSystem* audio, N3DSSoundInstance* inst, float gain, uint32_t timeMs, u64 nowTick) {
+    if (timeMs == 0) {
+        inst->fadeTicks = 0;
+        inst->gain = gain;
+        N3DSAudio_applyMix(audio, inst);
+        return;
+    }
+    inst->fadeFrom = inst->gain;
+    inst->fadeTo = gain;
+    inst->fadeStartTick = nowTick;
+    inst->fadeTicks = (u64) ((double) timeMs * (double) SYSCLOCK_ARM11 / 1000.0);
+    if (inst->fadeTicks == 0) inst->fadeTicks = 1;
+}
+
+static void N3DSAudio_updateFadeLocked(N3DSAudioSystem* audio, N3DSSoundInstance* inst, u64 nowTick) {
+    if (inst->fadeTicks == 0) return;
+    u64 elapsed = nowTick - inst->fadeStartTick;
+    if (elapsed >= inst->fadeTicks) {
+        inst->gain = inst->fadeTo;
+        inst->fadeTicks = 0;
+    } else {
+        float t = (float) ((double) elapsed / (double) inst->fadeTicks);
+        inst->gain = inst->fadeFrom + (inst->fadeTo - inst->fadeFrom) * t;
+    }
+    N3DSAudio_applyMix(audio, inst);
+}
+
+static void N3DSAudio_setSoundGain(AudioSystem* base, int32_t soundOrInstance, float gain, uint32_t timeMs) {
     N3DSAudioSystem* audio = (N3DSAudioSystem*) base;
+    u64 nowTick = svcGetSystemTick();
     LightLock_Lock(&audio->lock);
     gain = N3DSAudio_sanitizeGain(gain);
     if (N3DSAudio_isInstanceId(soundOrInstance)) {
@@ -3441,12 +3478,11 @@ static void N3DSAudio_setSoundGain(AudioSystem* base, int32_t soundOrInstance, f
             LightLock_Unlock(&audio->lock);
             return;
         }
-        inst->gain = gain;
         if (inst->soundIndex >= N3DS_AUDIO_STREAM_INDEX_BASE) {
             N3DSStreamEntry* stream = N3DSAudio_getActiveStreamEntry(audio, inst->soundIndex);
             if (stream != NULL) stream->gain = gain;
         }
-        N3DSAudio_applyMix(audio, inst);
+        N3DSAudio_setInstanceGainLocked(audio, inst, gain, timeMs, nowTick);
         LightLock_Unlock(&audio->lock);
         return;
     }
@@ -3455,8 +3491,7 @@ static void N3DSAudio_setSoundGain(AudioSystem* base, int32_t soundOrInstance, f
     repeat(N3DS_MAX_SOUND_INSTANCES, i) {
         N3DSSoundInstance* inst = &audio->instances[i];
         if (inst->active && inst->soundIndex == soundOrInstance) {
-            inst->gain = gain;
-            N3DSAudio_applyMix(audio, inst);
+            N3DSAudio_setInstanceGainLocked(audio, inst, gain, timeMs, nowTick);
         }
     }
     LightLock_Unlock(&audio->lock);

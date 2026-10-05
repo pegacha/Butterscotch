@@ -1,4 +1,5 @@
 #include "n3ds_input.h"
+#include "n3ds_gml.h"
 #include "n3ds_platform_config.h"
 
 #include "../log.h"
@@ -43,12 +44,13 @@ static const N3DSKeyMap gKeyMap[] = {
 #endif
 
 typedef struct {
-    int32_t kind; // 0 press, 1 screenshot, 2 exit, 3 touch
+    int32_t kind; // 0 press, 1 screenshot, 2 exit, 3 touch, 4 goto room, 5 place Samus
     int32_t frame;
     int32_t length;
     u32 key;
     int32_t anchor; // index into gAnchors, -1 = frames since start
     int32_t x, y, x2, y2;
+    char room[48]; // goto
 } N3DSHarnessCmd;
 
 #define N3DS_CHORD_FRAMES 3
@@ -108,6 +110,21 @@ static void N3DSInput_loadHarness(void) {
         if (tn >= 3) {
             N3DSHarnessCmd c = { .kind = 3, .frame = frame, .length = tn >= 4 ? tlen : 1, .anchor = (int32_t) arrlen(gAnchors) - 1,
                 .x = tx, .y = ty, .x2 = tn >= 6 ? tx2 : tx, .y2 = tn >= 6 ? ty2 : ty };
+            arrput(gHarness, c);
+            continue;
+        }
+        // "goto <frame> <room>": change to that room (like the desktop's debug Page Up/Down; persistent instances such
+        // as Samus come along). "place <frame> <x> <y>": move Samus (oCharacter) there. For reaching a room to test.
+        char gotoRoom[48] = "";
+        if (sscanf(line, "goto %d %47s", &frame, gotoRoom) == 2) {
+            N3DSHarnessCmd c = { .kind = 4, .frame = frame, .length = 1, .anchor = (int32_t) arrlen(gAnchors) - 1 };
+            snprintf(c.room, sizeof(c.room), "%s", gotoRoom);
+            arrput(gHarness, c);
+            continue;
+        }
+        int px = 0, py = 0;
+        if (sscanf(line, "place %d %d %d", &frame, &px, &py) == 3) {
+            N3DSHarnessCmd c = { .kind = 5, .frame = frame, .length = 1, .anchor = (int32_t) arrlen(gAnchors) - 1, .x = px, .y = py };
             arrput(gHarness, c);
             continue;
         }
@@ -258,6 +275,19 @@ u32 N3DSInput_update(Runner* runner) {
         if (c->kind == 0 && f >= c->frame && f < c->frame + c->length) held |= c->key;
         if (c->kind == 1 && f == c->frame) N3DSScreenshot_request(gFrame);
         if (c->kind == 2 && f == c->frame) gExitRequested = true;
+        if (c->kind == 4 && f == c->frame) {
+            int32_t roomIndex = N3DSGml_roomIndex(c->room);
+            if (roomIndex >= 0) runner->pendingRoom = roomIndex;
+            logInfo("Harness: goto %s (%d) at frame %d\n", c->room, (int) roomIndex, (int) gFrame);
+        }
+        if (c->kind == 5 && f == c->frame) {
+            Instance* samus = N3DSGml_anyInstance(N3DSGml_objectIndex("oCharacter"));
+            if (samus != NULL) {
+                samus->x = (float) c->x;
+                samus->y = (float) c->y;
+            }
+            logInfo("Harness: place Samus at %d,%d at frame %d%s\n", (int) c->x, (int) c->y, (int) gFrame, samus == NULL ? " (no oCharacter)" : "");
+        }
         if (c->kind == 3 && f >= c->frame && f < c->frame + c->length) {
             float t = c->length > 1 ? (float) (f - c->frame) / (float) (c->length - 1) : 0.0f;
             gTouchHeld = true;

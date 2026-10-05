@@ -29,7 +29,8 @@ Emulator loop (Windows host, WSL build): `tools/n3ds/run_in_azahar.ps1` installs
 Vulkan) and collects `log.txt`, screenshots and Azahar's log (`-Harness`, `-Save`, `-ClearSaves`, `-Inputs`,
 `-WaitSeconds` hard limit, `-CpuClock`: **100 approximates hardware**; 300 hides CPU-bound problems).
 `harness.txt` = scripted presses / self-screenshots / exit, with `after_room` anchors (`hwcheck.txt`: title, load,
-pause, walk; `pause.txt`; `explore.txt`). `inputs.json` = keyboard playback in the desktop `--playback-inputs`
+pause, walk; `pause.txt`; `explore.txt`); `goto <frame> <room>` and `place <frame> <x> <y>` (moves Samus) reach a
+room to test without playing to it. `inputs.json` = keyboard playback in the desktop `--playback-inputs`
 format with a fixed seed; `tools/n3ds/run_tas.ps1` (and `run_tas.bat`, drag a `.ltm` onto it) replays a libTAS
 movie via `ltm_to_inputs.py`. `-DENABLE_VM_GML_PROFILER=ON` logs a GML profile every 120 frames.
 

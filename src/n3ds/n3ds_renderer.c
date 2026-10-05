@@ -5033,6 +5033,7 @@ static void N3DSRenderer_releaseSurfaceTexture(N3DSRenderer* renderer, N3DSSurfa
 }
 
 #define N3DS_SURFACE_POOL_MAX 6
+#define N3DS_SURFACE_ID_REUSE_AFTER 1024
 
 static void N3DSRenderer_deleteSurfaceTexture(N3DSDeferredSurfaceFree* entry) {
     if (entry->target != NULL) C3D_RenderTargetDelete(entry->target);
@@ -5186,9 +5187,17 @@ static bool N3DSRenderer_allocSurfaceTexture(N3DSRenderer* renderer, N3DSSurface
 
 static int32_t N3DSRenderer_createSurface(Renderer* base, int32_t width, int32_t height) {
     N3DSRenderer* renderer = (N3DSRenderer*) base;
+    // A new id each time, as the desktop renderer: games free surface ids they no longer own (AM2R's oControl frees
+    // its stale screen_surface id every frame), and a reused id made that free another surface (the HUD's, Samus's),
+    // which then flickered as it was freed and recreated. Freed ids are reused only once there are this many.
     int32_t id = -1;
-    repeat(arrlen(renderer->surfaces), i) {
-        if (!renderer->surfaces[i].exists) { id = (int32_t) i; break; }
+    if (arrlen(renderer->surfaces) >= N3DS_SURFACE_ID_REUSE_AFTER) {
+        repeat(arrlen(renderer->surfaces), i) {
+            if (!renderer->surfaces[i].exists && (base->runner == NULL || (int32_t) i != base->runner->applicationSurfaceId)) {
+                id = (int32_t) i;
+                break;
+            }
+        }
     }
     if (id < 0) {
         N3DSSurface empty;

@@ -3962,7 +3962,9 @@ void Runner_handlePendingRoomChange(Runner* runner) {
         runner->pendingRoom = -1;
 
         // Fire Room End for all instances
+        uint64_t phaseStart = nowNanos();
         Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_ROOM_END);
+        uint64_t roomEndNanos = nowNanos() - phaseStart;
         require(runner->dataWin->room.count > (uint32_t) newRoomIndex);
         const char* newRoomName = runner->dataWin->room.rooms[newRoomIndex].name;
 
@@ -3979,13 +3981,27 @@ void Runner_handlePendingRoomChange(Runner* runner) {
         }
 
         // Load new room
+        phaseStart = nowNanos();
         initRoom(runner, newRoomIndex);
+        uint64_t loadNanos = nowNanos() - phaseStart;
 
         // Fire Room Start for all instances
+        phaseStart = nowNanos();
         Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_ROOM_START);
+        uint64_t roomStartNanos = nowNanos() - phaseStart;
 
+        phaseStart = nowNanos();
         Runner_cleanupDestroyedInstances(runner);
         Runner_sweepDeadStructs(runner);
+        uint64_t cleanupNanos = nowNanos() - phaseStart;
+
+        // Where a slow room change went (load = the room's instances with their Create events and creation code).
+        uint64_t totalNanos = roomEndNanos + loadNanos + roomStartNanos + cleanupNanos;
+        if (totalNanos >= 50000000u) {
+            logInfo("Room change to %s took %.1f ms: room end %.1f, load %.1f, room start %.1f, cleanup %.1f\n", newRoomName,
+                (double) totalNanos / 1e6, (double) roomEndNanos / 1e6, (double) loadNanos / 1e6, (double) roomStartNanos / 1e6,
+                (double) cleanupNanos / 1e6);
+        }
     }
 }
 

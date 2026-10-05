@@ -804,11 +804,19 @@ int main(int argc, char** argv) {
         if (debugMonitorVisible) N3DSDebugMonitor_draw(&debugMonitor, runner, renderer, paused);
         N3DSSavingIndicator_draw(&savingIndicator, renderer, N3DSCachedFileSystem_isSaving(fileSystem));
         renderer->vtable->flush(renderer);
+        // After the frame's drawing (all counted as draw): the room change, the renderer's texture collection and the
+        // game files' write-back, timed on their own for the slow-frame line.
+        u64 roomChangeStartTick = svcGetSystemTick();
         Runner_handlePendingRoomChange(runner);
         renderer->vtable->flush(renderer);
+        double roomChangeMs = N3DSProf_ms(svcGetSystemTick() - roomChangeStartTick);
         C3D_FrameEnd(0);
+        u64 gcStartTick = svcGetSystemTick();
         N3DSRenderer_collectGarbage(renderer, false);
+        double gcMs = N3DSProf_ms(svcGetSystemTick() - gcStartTick);
+        u64 fsFlushStartTick = svcGetSystemTick();
         N3DSCachedFileSystem_flush(fileSystem, false);
+        double fsFlushMs = N3DSProf_ms(svcGetSystemTick() - fsFlushStartTick);
         u64 frameEndTick = svcGetSystemTick();
         double drawMs = N3DSProf_ms(frameEndTick - drawStartTick);
         double frameTimes[N3DS_FT_COUNT] = {
@@ -829,10 +837,10 @@ int main(int argc, char** argv) {
         u64 frameEndMs = osGetTime();
         if (roomChanged || (frameTimes[N3DS_FT_FRAME] > 100.0 && frameEndMs - lastSlowLogMs >= 500u)) {
             if (!roomChanged) lastSlowLogMs = frameEndMs;
-            logInfo("%s %d (%s): %.1f ms = step %.1f + wait %.1f + draw %.1f + prewarm %.1f; io %.1f, tex %.1f, fs %.1f, audio %.1f\n",
+            logInfo("%s %d (%s): %.1f ms = step %.1f + wait %.1f + draw %.1f (room change %.1f, texture gc %.1f, file flush %.1f) + prewarm %.1f; io %.1f, tex %.1f, fs %.1f, audio %.1f\n",
                 roomChanged ? "Room frame" : "Slow frame", (int) runner->frameCount,
                 runner->currentRoom != NULL ? runner->currentRoom->name : "-",
-                frameTimes[N3DS_FT_FRAME], stepMs, waitMs, drawMs, frameTimes[N3DS_FT_PREWARM],
+                frameTimes[N3DS_FT_FRAME], stepMs, waitMs, drawMs, roomChangeMs, gcMs, fsFlushMs, frameTimes[N3DS_FT_PREWARM],
                 frameTimes[N3DS_FT_IO], frameTimes[N3DS_FT_TEX], frameTimes[N3DS_FT_FS], frameTimes[N3DS_FT_AUDIO]);
         }
 

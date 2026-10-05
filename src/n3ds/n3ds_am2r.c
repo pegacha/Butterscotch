@@ -8,6 +8,7 @@
 #include "../utils.h"
 #include "../vm.h"
 
+#include <stb/ds/stb_ds.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -70,14 +71,29 @@ typedef struct {
 
 static N3DSAm2r gAm2r;
 
+// get_text results by "<language>|<section>|<key>": get_text opens, reads and closes lang/<language>.ini on every call,
+// and ini_close serializes the whole file (30 KB in English) each time, which shows as hitches when a room creates many
+// labelled things. The language files aren't written while the game runs.
+typedef struct {
+    char* key;
+    char* value;
+} N3DSAm2rText;
+static N3DSAm2rText* gTextCache = NULL;
+
 static RValue hookGetText(VMContext* ctx, RValue* args, int32_t argCount);
 static RValue hookGetXJoyBtnName(VMContext* ctx, RValue* args, int32_t argCount);
 static RValue hookGetXJoyBtnSprite(VMContext* ctx, RValue* args, int32_t argCount);
+static RValue hookDamageSamus(VMContext* ctx, RValue* args, int32_t argCount);
+static RValue hookDamageSamusKnockdown(VMContext* ctx, RValue* args, int32_t argCount);
+static RValue hookDamageSamusPush(VMContext* ctx, RValue* args, int32_t argCount);
 
 static N3DSAm2rHook gHooks[] = {
     { "get_text", hookGetText, -1 },
     { "get_xjoybtnname", hookGetXJoyBtnName, -1 },
     { "get_xjoybtnsprite", hookGetXJoyBtnSprite, -1 },
+    { "damage_samus", hookDamageSamus, -1 },
+    { "damage_samus_knockdown", hookDamageSamusKnockdown, -1 },
+    { "damage_samus_push", hookDamageSamusPush, -1 },
 };
 
 static int32_t N3DSAm2r_hookScript(BuiltinFunc hook) {
@@ -117,6 +133,19 @@ static RValue hookGetText(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t arg
     if (strcmp(section, "OptionsMain") == 0 && strcmp(key, "Display_Tip") == 0) {
         return RValue_makeOwnedString(safeStrdup("Unlimited health and ammo, stronger weapons"));
     }
+    char cacheKey[256] = "";
+    if (argCount == 2 && args[0].type == RVALUE_STRING && args[1].type == RVALUE_STRING) {
+        double language = 0.0;
+        N3DSGml_getGlobal("currentlanguage", -1, &language);
+        int n = snprintf(cacheKey, sizeof(cacheKey), "%g|%s|%s", language, section, key);
+        if (n < 0 || n >= (int) sizeof(cacheKey)) cacheKey[0] = '\0';
+    }
+    if (cacheKey[0] != '\0') {
+        // Before the first shgeti, which would make a map that doesn't copy its keys.
+        if (gTextCache == NULL) sh_new_strdup(gTextCache);
+        ptrdiff_t at = shgeti(gTextCache, cacheKey);
+        if (at >= 0) return RValue_makeOwnedString(safeStrdup(gTextCache[at].value));
+    }
     RValue result = N3DSAm2r_callOriginal(hookGetText, args, argCount);
     if (result.type != RVALUE_STRING || result.string == NULL) return result;
     if (strcmp(section, "OptionsControl") == 0 && strcmp(key, "KeyboardSettings") == 0) {
@@ -124,9 +153,14 @@ static RValue hookGetText(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t arg
         gAm2r.keyboardLabel = safeStrdup(result.string);
     }
     char* nintendo = N3DSAm2r_nintendoText(result.string);
-    if (nintendo == NULL) return result;
-    RValue_free(&result);
-    return RValue_makeOwnedString(nintendo);
+    if (nintendo != NULL) {
+        RValue_free(&result);
+        result = RValue_makeOwnedString(nintendo);
+    }
+    if (cacheKey[0] != '\0') {
+        shput(gTextCache, cacheKey, safeStrdup(result.string));
+    }
+    return result;
 }
 
 // Xbox buttons by position -> the 3DS buttons in those positions.
@@ -157,6 +191,32 @@ static RValue hookGetXJoyBtnSprite(MAYBE_UNUSED VMContext* ctx, RValue* args, in
     if (swapped == sprite || swapped < 0) return result;
     RValue_free(&result);
     return RValue_makeReal((GMLReal) swapped);
+}
+
+// ===[ Unlimited health ]===
+
+static bool N3DSAm2r_cheat(int which);
+
+// damage_samus(damage, hpush, vpush, ...) and the knockdown / push variants take the damage first: none with the
+// health cheat, the knockback stays.
+static RValue N3DSAm2r_damage(BuiltinFunc hook, RValue* args, int32_t argCount) {
+    if (argCount > 0 && N3DSAm2r_cheat(CHEAT_HEALTH)) {
+        RValue_free(&args[0]);
+        args[0] = RValue_makeReal(0.0);
+    }
+    return N3DSAm2r_callOriginal(hook, args, argCount);
+}
+
+static RValue hookDamageSamus(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    return N3DSAm2r_damage(hookDamageSamus, args, argCount);
+}
+
+static RValue hookDamageSamusKnockdown(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    return N3DSAm2r_damage(hookDamageSamusKnockdown, args, argCount);
+}
+
+static RValue hookDamageSamusPush(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    return N3DSAm2r_damage(hookDamageSamusPush, args, argCount);
 }
 
 // ===[ Cheats file ]===
@@ -377,7 +437,8 @@ static void N3DSAm2r_applyCheats(void) {
     if (!gAm2r.cheats[CHEAT_MASTER]) return;
     double inGame = 0.0;
     if (!N3DSGml_getGlobal("ingame", -1, &inGame) || inGame == 0.0) return;
-    if (N3DSAm2r_cheat(CHEAT_HEALTH)) N3DSAm2r_fillGlobal("playerhealth", "maxhealth");
+    // Other drains (heat, Metroids latched on) go straight to samushealth: filled after every step.
+    if (N3DSAm2r_cheat(CHEAT_HEALTH)) N3DSAm2r_fillGlobal("samushealth", "maxhealth");
     if (N3DSAm2r_cheat(CHEAT_AMMO)) {
         N3DSAm2r_fillGlobal("missiles", "maxmissiles");
         N3DSAm2r_fillGlobal("smissiles", "maxsmissiles");

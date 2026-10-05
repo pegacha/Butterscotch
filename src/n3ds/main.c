@@ -479,12 +479,24 @@ static uint32_t N3DS_useIeeeRounding(void) {
     return fpscr;
 }
 
+// Sleep mode (closing the lid) and the HOME Menu: aptMainLoop, called once a frame, handles both and blocks until the
+// console wakes / the game is back, with the worker threads idle on their events; NDSP stops and restarts its own
+// output. On the way back the frame clock starts over, so the first frame's delta_time isn't the time asleep.
+static volatile bool gN3DSResumed = false;
+static aptHookCookie gN3DSAptCookie;
+
+static void N3DS_aptHook(APT_HookType hook, MAYBE_UNUSED void* param) {
+    if (hook == APTHOOK_ONWAKEUP || hook == APTHOOK_ONRESTORE) gN3DSResumed = true;
+}
+
 int main(int argc, char** argv) {
     uint32_t startFpscr = N3DS_useIeeeRounding();
     gfxInitDefault();
     romfsInit();
     osSetSpeedupEnable(true);
     APT_SetAppCpuTimeLimit(30);
+    aptSetSleepAllowed(true);
+    aptHook(&gN3DSAptCookie, N3DS_aptHook, NULL);
 
     mkdir("sdmc:/3ds", 0777);
     mkdir(N3DS_SD_DIR, 0777);
@@ -687,6 +699,10 @@ int main(int argc, char** argv) {
         u64 frameStartTick = svcGetSystemTick();
         memset(gN3DSProfTicks, 0, sizeof(gN3DSProfTicks));
         uint64_t frameStartNow = nowNanos();
+        if (gN3DSResumed) {
+            gN3DSResumed = false;
+            lastFrameStartTime = frameStartNow - (uint64_t) (1.0e9 / gameSpeed);
+        }
         runner->deltaTime = (int64_t) (frameStartNow - lastFrameStartTime) / 1000.0;
         lastFrameStartTime = frameStartNow;
 
@@ -872,6 +888,7 @@ int main(int argc, char** argv) {
         C2D_Fini();
         C3D_Fini();
     }
+    aptUnhook(&gN3DSAptCookie);
     romfsExit();
     gfxExit();
     return 0;

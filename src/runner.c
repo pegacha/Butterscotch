@@ -3532,6 +3532,16 @@ static void dispatchCollisionEvents(Runner* runner) {
                     if (mostSpecificCollisionTarget(runner, self, other) != targetObjIndex)
                         continue;
 
+                    // HTML5 (Events.js HandleCollision, LoadGame.js AddCollision) lists each pair of colliding objects
+                    // once and runs both instances' collision events when they meet, the second even if the first
+                    // destroyed an instance (AM2R: oMissile explodes on oMAlpha, and oMAlpha's event still takes the
+                    // damage). When both have an event for the other, the pair is handled in the pass of the lower
+                    // object index (lower instance id within one object), which runs both; the other pass skips it.
+                    bool otherHandlesSelf = findSymmetricCollisionEvent(runner, other, self) != nullptr;
+                    if (otherHandlesSelf && (other->objectIndex < self->objectIndex ||
+                                             (other->objectIndex == self->objectIndex && other->instanceId < self->instanceId)))
+                        continue;
+
                     // Compute bboxes
                     if (selfDirty) {
                         bboxSelf = Collision_computeBBox(runner, self);
@@ -3601,12 +3611,9 @@ static void dispatchCollisionEvents(Runner* runner) {
 #endif
                     executeCollisionEvent(runner, self, other, targetObjIndex, evt->codeId, evt->ownerObjectIndex);
 
-                    // When both objects are colliding, we'll execute the SELF collision (which we already did) and THEN execute the OTHER collision too
-                    // Because if we don't, the OTHER collision may never happen again because
-                    // * GML code may have pushed it away
-                    // * Solid collision resolution may have also pushed it away
-                    // This ONLY happens if one of them was solid
-                    if (hadSolid && other->active && self->active) {
+                    // Then the OTHER instance's collision event, if it has one for us (the pair is skipped in its own pass,
+                    // above): self's event may have destroyed self or pushed the two apart (GML, solid resolution).
+                    if (otherHandlesSelf && other->active) {
                         FlattenedCollisionEvent* reverseEvt = findSymmetricCollisionEvent(runner, other, self);
 #ifdef ENABLE_VM_TRACING
                         if (traceThisPair) {

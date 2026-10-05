@@ -18,13 +18,12 @@
 //    global.mapmarker / mapmarkerx / mapmarkery is the player's marker (sMapMarker, frame oControl.markfr).
 // Around it, the pause screen's map page (oSS_Fg / draw_surface_map): the bgMapScreenBG grid behind the cells
 // (tiled from cell 3,3), black bands top and bottom, the bg_SubScrBottom bar with the page title, and the
-// bg_MapBottom bar with the play time (steps_to_time2(global.gametime)) and the Metroids left (global.monstersleft,
+// bg_MapBottom bar with the play time (as steps_to_time2(global.gametime)) and the Metroids left (global.monstersleft,
 // global.monstersarea).
 // The cells are redrawn only when they change: Samus changes cell, the marker moves, or a cell in view is explored
 // (checked every few frames); the finished frame is kept as the bottom-screen picture for the frames in between. The
 // bars, text and highlight are drawn on top of it every frame (the black bands cover the old ones), so the clock
-// doesn't need a redraw. get_text reads the language file and steps_to_time2 runs GML: the title is fetched once per
-// language and the clock once a second.
+// doesn't need a redraw. get_text reads the language file: the title is fetched once per language.
 
 #define N3DS_LIVEMAP_CELL 8
 #define N3DS_LIVEMAP_CHECK_FRAMES 15
@@ -36,7 +35,7 @@ typedef struct {
     Renderer* renderer;
     int32_t sprBlock, sprCorner, sprHLine, sprVLine, sprHPass, sprVPass, sprSP, sprHilight, sprMarker;
     int32_t objControl;
-    int32_t bgGrid, bgTopBar, bgBottomBar, font, scriptTime, scriptText;
+    int32_t bgGrid, bgTopBar, bgBottomBar, font, scriptText;
     uint32_t frame;
     uint32_t lastDrawCall;
     uint32_t lastCheck;
@@ -46,7 +45,8 @@ typedef struct {
     float topBandEnd, bottomBandStart;
     char* title;
     double titleLanguage;
-    char* time;
+    bool titleFetched;
+    char time[16];
     int32_t timeSeconds;
     bool pendingCapture;
     bool haveSnapshot;
@@ -56,7 +56,6 @@ static N3DSLiveMap gLive;
 
 void N3DSLiveMap_init(Runner* runner, Renderer* renderer) {
     free(gLive.title);
-    free(gLive.time);
     memset(&gLive, 0, sizeof(gLive));
     gLive.timeSeconds = -1;
     gLive.runner = runner;
@@ -75,7 +74,6 @@ void N3DSLiveMap_init(Runner* runner, Renderer* renderer) {
     gLive.bgTopBar = N3DSGml_backgroundIndex("bg_SubScrBottom");
     gLive.bgBottomBar = N3DSGml_backgroundIndex("bg_MapBottom");
     gLive.font = N3DSGml_fontIndex("fontGUI2");
-    gLive.scriptTime = N3DSGml_scriptIndex("steps_to_time2");
     gLive.scriptText = N3DSGml_scriptIndex("get_text");
     gLive.lastPx = gLive.lastPy = INT32_MIN;
     DataWin* dataWin = runner->dataWin;
@@ -212,21 +210,23 @@ static void N3DSLiveMap_drawFrame(void) {
     N3DSLiveMap_background(gLive.bgBottomBar, 0.0f, 198.0f, 1.0f);
     double language = 0.0;
     N3DSGml_getGlobal("currentlanguage", -1, &language);
-    if (gLive.scriptText >= 0 && (gLive.title == NULL || language != gLive.titleLanguage)) {
+    // Once per language, whatever comes back (a failing call isn't retried every frame).
+    if (gLive.scriptText >= 0 && (!gLive.titleFetched || language != gLive.titleLanguage)) {
         RValue titleArgs[2] = { RValue_makeString("Subscreen"), RValue_makeString("Title_Map") };
         free(gLive.title);
         gLive.title = N3DSLiveMap_callText(gLive.scriptText, titleArgs, 2);
         gLive.titleLanguage = language;
+        gLive.titleFetched = true;
     }
     N3DSLiveMap_text(gLive.title != NULL ? gLive.title : "MAP", 160.0f, 29.0f, 1);
     double gameTime = 0.0;
-    if (gLive.scriptTime >= 0 && N3DSGml_getGlobal("gametime", -1, &gameTime)) {
-        // gametime counts steps (60 a second); the clock shows whole seconds.
+    if (N3DSGml_getGlobal("gametime", -1, &gameTime)) {
+        // steps_to_time2(gametime): gametime counts steps (60 a second), shown as HH:MM:SS. Done here, not by calling
+        // the script: it keeps its working values in self's variables, and there is no self out here (each access
+        // logged a warning, ~25 a call).
         int32_t seconds = (int32_t) (gameTime / 60.0);
-        if (gLive.time == NULL || seconds != gLive.timeSeconds) {
-            RValue arg = RValue_makeReal((GMLReal) gameTime);
-            free(gLive.time);
-            gLive.time = N3DSLiveMap_callText(gLive.scriptTime, &arg, 1);
+        if (seconds != gLive.timeSeconds) {
+            snprintf(gLive.time, sizeof(gLive.time), "%02d:%02d:%02d", (int) (seconds / 3600), (int) (seconds / 60 % 60), (int) (seconds % 60));
             gLive.timeSeconds = seconds;
         }
         N3DSLiveMap_text(gLive.time, 17.0f, 197.0f, 0);

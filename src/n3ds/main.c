@@ -47,6 +47,7 @@ extern u32 __ctru_heap_size;
 
 void N3DSLog_init(void);
 void N3DSLog_close(void);
+void N3DSLog_tick(void);
 
 typedef struct {
     bool useCitro2D;
@@ -843,6 +844,8 @@ int main(int argc, char** argv) {
             }
             break;
         }
+
+        N3DSLog_tick();
 
         statsFrames++;
         statsStepMs += stepMs;

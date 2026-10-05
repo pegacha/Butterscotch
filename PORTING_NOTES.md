@@ -49,8 +49,10 @@ movie via `ltm_to_inputs.py`. `-DENABLE_VM_GML_PROFILER=ON` logs a GML profile e
   area (top-left part). Over 1024 only the top-left 1024 is stored (PICA limit). AM2R's 2048x1024 pause map ends
   up as 1024x512 RGBA5551, which holds the whole map (it uses about 600x464).
 - Screen: AM2R lays out its own 320x240 (application surface and HUD at its own offsets), so the default mode
-  (`N3DS_SCREEN_MODE`) stretches it to 400x240 (also: widescreen hack, 1:1 pillarbox). The touch screen belongs to
-  the pause screen.
+  (`N3DS_SCREEN_MODE`) stretches it to 400x240 (also: widescreen hack, 1:1 pillarbox). In AM2R the mode is picked in
+  Options -> Display -> Screen: Stretch (default), 1x (320x240 centred), 2x (doubled and centred: the middle
+  200x120, the edges and HUD off screen) or Wide (the widescreen hack); 1x/2x use `N3DSRenderer_setFixedScale`. The
+  touch screen belongs to the pause screen.
 - Pause screen (`n3ds_pause.c`): while the game is in `rm_subscreen` (or the transition into it), the game's
   screen (`RENDER_TARGET_HOST_FRAMEBUFFER`) is the bottom screen, 1:1, and the top screen shows the game as it was
   when paused. That frame is captured when Start goes into the input delay line (AM2R blanks the screen on the
@@ -72,9 +74,10 @@ movie via `ltm_to_inputs.py`. `-DENABLE_VM_GML_PROFILER=ON` logs a GML profile e
 - AM2R adjustments from the front end (`n3ds_am2r.c`; the game's files are unchanged): calls to the game's
   `get_text`, `get_xjoybtnname` and `get_xjoybtnsprite` go through C hooks that call the game's script and adjust
   the result (Nintendo button names, A/B and X/Y icons swapped by position, "XBox 360 Joypad" -> "Nintendo 3DS",
-  Display -> Cheats). The Control page's Keyboard row is hidden (`canedit` 0, rows below moved up); the Display
-  page is replaced by a Cheats page built from the game's own row objects (`oMenuLabel`, `oOptionLR`,
-  `oPauseOption`) and driven from C (`oControl.k*`); cheats live in `sdmc:/3ds/am2r/cheats.ini`. The water/lava
+  Display tip). The Control page's Keyboard row is hidden (`canedit` 0, rows below moved up); the Display page is
+  replaced by a 3DS one (Screen, Cheats, Exit) and a Cheats page under it, built from the game's own row objects
+  (`oMenuLabel`, `oOptionLR`, `oPauseOption`) and driven from C (`oControl.k*`); cheats and the screen mode live in
+  `sdmc:/3ds/am2r/cheats.ini`. The water/lava
   ripple filter `oWaterFXV2` (a copy of the screen redrawn in 1-pixel strips every frame) is removed.
 - Start+Select toggles the debug monitor (on the top screen while paused). Start and Select reach the game 3 frames
   late, press for press, so the chord is caught before the game sees either.

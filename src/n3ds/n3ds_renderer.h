@@ -50,6 +50,8 @@ void N3DSRenderer_collectGarbage(Renderer* renderer, bool all);
 void N3DSRenderer_logDiag(Renderer* renderer);
 // Stretch the game to the whole top screen (else integer scale, centred).
 void N3DSRenderer_setStretchToScreen(Renderer* renderer, bool stretch);
+// 1x / 2x screen modes: the game's picture at this scale on the top screen, centred (0: the usual fit).
+void N3DSRenderer_setFixedScale(Renderer* renderer, int32_t scale);
 // Sends the game's screen (RENDER_TARGET_HOST_FRAMEBUFFER) to the bottom screen, 1:1 (the pause screen).
 void N3DSRenderer_setHostScreenBottom(Renderer* renderer, bool bottom);
 // Keeps the last finished top-screen frame (call right after C3D_FrameBegin) / shows it / lets it go.

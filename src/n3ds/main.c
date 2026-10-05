@@ -21,6 +21,7 @@
 #include "n3ds_platform_config.h"
 #include "n3ds_prof.h"
 #include "n3ds_renderer.h"
+#include "n3ds_screen.h"
 #include "n3ds_unimpl.h"
 
 #include <3ds.h>
@@ -431,13 +432,6 @@ static void N3DSDataWinProgressCallback(const char* chunkName, int chunkIndex, i
 
 static void N3DS_noopSetWindowTitle(MAYBE_UNUSED const char* title) {}
 static void N3DS_noopSetWindowSize(MAYBE_UNUSED int32_t width, MAYBE_UNUSED int32_t height) {}
-typedef enum {
-    N3DS_SCREEN_WIDE,
-    N3DS_SCREEN_STRETCH,
-    N3DS_SCREEN_PILLARBOX,
-    N3DS_SCREEN_MODE_COUNT
-} N3DSScreenMode;
-
 #ifndef N3DS_DEFAULT_SCREEN_MODE
 #define N3DS_DEFAULT_SCREEN_MODE N3DS_SCREEN_WIDE
 #endif
@@ -449,8 +443,20 @@ static const char* N3DS_screenModeName(N3DSScreenMode mode) {
     switch (mode) {
         case N3DS_SCREEN_WIDE: return "wide (more of the room, 1:1)";
         case N3DS_SCREEN_STRETCH: return "stretch";
+        case N3DS_SCREEN_1X: return "1x";
+        case N3DS_SCREEN_2X: return "2x";
         default: return "pillarbox (1:1)";
     }
+}
+
+N3DSScreenMode N3DS_getScreenMode(void) {
+    return gScreenMode;
+}
+
+void N3DS_setScreenMode(N3DSScreenMode mode) {
+    if ((int) mode < 0 || (int) mode >= (int) N3DS_SCREEN_MODE_COUNT || mode == gScreenMode) return;
+    gScreenMode = mode;
+    logInfo("Screen mode: %s\n", N3DS_screenModeName(gScreenMode));
 }
 
 static bool N3DS_getWindowSize(int32_t* outW, int32_t* outH) {
@@ -780,12 +786,15 @@ int main(int argc, char** argv) {
                 gameW = targetW;
             }
         }
-        // The "window" the game sees: the screen, except in Stretch mode where it is the game's own size (and the
-        // renderer stretches that to the screen).
+        // The "window" the game sees: the screen, except in Stretch, 1x and 2x where it is the game's own size (and the
+        // renderer stretches that to the screen, or scales it by 1 or 2, centred).
         bool stretch = gScreenMode == N3DS_SCREEN_STRETCH;
-        gWindowW = stretch ? (runner->usingAppSurface ? runner->applicationWidth : (int32_t) gen8->defaultWindowWidth) : N3DS_TOP_SCREEN_W;
-        gWindowH = stretch ? (runner->usingAppSurface ? runner->applicationHeight : (int32_t) gen8->defaultWindowHeight) : N3DS_TOP_SCREEN_H;
+        int32_t fixedScale = gScreenMode == N3DS_SCREEN_1X ? 1 : gScreenMode == N3DS_SCREEN_2X ? 2 : 0;
+        bool gameSizedWindow = stretch || fixedScale > 0;
+        gWindowW = gameSizedWindow ? (runner->usingAppSurface ? runner->applicationWidth : (int32_t) gen8->defaultWindowWidth) : N3DS_TOP_SCREEN_W;
+        gWindowH = gameSizedWindow ? (runner->usingAppSurface ? runner->applicationHeight : (int32_t) gen8->defaultWindowHeight) : N3DS_TOP_SCREEN_H;
         N3DSRenderer_setStretchToScreen(renderer, stretch);
+        N3DSRenderer_setFixedScale(renderer, fixedScale);
 
         u64 drawStartTick = svcGetSystemTick();
         Runner_drawPre(runner, gWindowW, gWindowH);

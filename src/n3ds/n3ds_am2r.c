@@ -2,6 +2,7 @@
 
 #include "n3ds_gml.h"
 #include "n3ds_platform_config.h"
+#include "n3ds_screen.h"
 
 #include "../log.h"
 #include "../renderer.h"
@@ -30,6 +31,9 @@
 #define N3DS_AM2R_CHEATS_FILE N3DS_SD_DIR "cheats.ini"
 
 enum { CHEAT_MASTER, CHEAT_HEALTH, CHEAT_AMMO, CHEAT_BEAM, CHEAT_BOMBS, CHEAT_MISSILES, CHEAT_COUNT };
+enum { DISPLAY_ROW_SCREEN, DISPLAY_ROW_CHEATS, DISPLAY_ROW_EXIT, DISPLAY_ROW_COUNT };
+
+typedef enum { PAGE_NONE, PAGE_DISPLAY, PAGE_CHEATS } N3DSAm2rPage;
 
 static const char* const kCheatNames[CHEAT_COUNT] = { "master", "health", "ammo", "beam", "bombs", "missiles" };
 static const char* const kCheatLabels[CHEAT_COUNT] = {
@@ -62,11 +66,11 @@ typedef struct {
     char* keyboardLabel; // what get_text gave for the Keyboard settings row
     int32_t lastControlPage;
     bool cheats[CHEAT_COUNT];
-    // The Cheats page while it is up: instance ids of its title and rows (CHEAT_COUNT toggles, then Exit).
-    bool pageOpen;
+    // The Display or Cheats page while it is up: instance ids of its title and rows (the last one Exit).
+    N3DSAm2rPage page;
     int32_t pageFrames;
     int32_t pageTitle;
-    int32_t pageRows[CHEAT_COUNT + 1];
+    int32_t pageRows[CHEAT_COUNT + 1 > DISPLAY_ROW_COUNT ? CHEAT_COUNT + 1 : DISPLAY_ROW_COUNT];
 } N3DSAm2r;
 
 static N3DSAm2r gAm2r;
@@ -129,9 +133,8 @@ static char* N3DSAm2r_nintendoText(const char* text) {
 static RValue hookGetText(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
     const char* section = argCount > 0 && args[0].type == RVALUE_STRING ? args[0].string : "";
     const char* key = argCount > 1 && args[1].type == RVALUE_STRING ? args[1].string : "";
-    if (strcmp(section, "OptionsMain") == 0 && strcmp(key, "Display") == 0) return RValue_makeOwnedString(safeStrdup("Cheats"));
     if (strcmp(section, "OptionsMain") == 0 && strcmp(key, "Display_Tip") == 0) {
-        return RValue_makeOwnedString(safeStrdup("Unlimited health and ammo, stronger weapons"));
+        return RValue_makeOwnedString(safeStrdup("Screen mode and cheats"));
     }
     char cacheKey[256] = "";
     if (argCount == 2 && args[0].type == RVALUE_STRING && args[1].type == RVALUE_STRING) {
@@ -219,7 +222,22 @@ static RValue hookDamageSamusPush(MAYBE_UNUSED VMContext* ctx, RValue* args, int
     return N3DSAm2r_damage(hookDamageSamusPush, args, argCount);
 }
 
-// ===[ Cheats file ]===
+// ===[ Screen mode ]===
+
+// The screen modes the Display page offers, in order (Stretch first: the default).
+static const N3DSScreenMode kScreenModes[] = { N3DS_SCREEN_STRETCH, N3DS_SCREEN_1X, N3DS_SCREEN_2X, N3DS_SCREEN_WIDE };
+static const char* const kScreenModeNames[] = { "Stretch", "1x", "2x", "Wide" };
+#define N3DS_AM2R_SCREEN_MODES ((int) (sizeof(kScreenModes) / sizeof(kScreenModes[0])))
+
+static int N3DSAm2r_screenModeSlot(void) {
+    N3DSScreenMode mode = N3DS_getScreenMode();
+    for (int i = 0; i < N3DS_AM2R_SCREEN_MODES; i++) {
+        if (kScreenModes[i] == mode) return i;
+    }
+    return 0;
+}
+
+// ===[ Cheats file (and the screen mode) ]===
 
 static void N3DSAm2r_loadCheats(void) {
     FILE* f = fopen(N3DS_AM2R_CHEATS_FILE, "r");
@@ -229,6 +247,7 @@ static void N3DSAm2r_loadCheats(void) {
         char name[32];
         int value = 0;
         if (sscanf(line, "%31[^=]=%d", name, &value) != 2) continue;
+        if (strcmp(name, "screen") == 0 && value >= 0 && value < N3DS_AM2R_SCREEN_MODES) N3DS_setScreenMode(kScreenModes[value]);
         for (int i = 0; i < CHEAT_COUNT; i++) {
             if (strcmp(name, kCheatNames[i]) == 0) gAm2r.cheats[i] = value != 0;
         }
@@ -240,6 +259,7 @@ static void N3DSAm2r_saveCheats(void) {
     FILE* f = fopen(N3DS_AM2R_CHEATS_FILE, "w");
     if (f == NULL) return;
     for (int i = 0; i < CHEAT_COUNT; i++) fprintf(f, "%s=%d\n", kCheatNames[i], gAm2r.cheats[i] ? 1 : 0);
+    fprintf(f, "screen=%d\n", N3DSAm2r_screenModeSlot());
     fclose(f);
 }
 
@@ -337,45 +357,63 @@ static Instance* N3DSAm2r_pageRow(int i) {
     return N3DSGml_instanceById(gAm2r.pageRows[i]);
 }
 
-static void N3DSAm2r_refreshCheatsPage(void) {
+// Rows of each page (the last one is Exit).
+static int N3DSAm2r_pageRowCount(N3DSAm2rPage page) {
+    return page == PAGE_DISPLAY ? DISPLAY_ROW_COUNT : CHEAT_COUNT + 1;
+}
+
+static void N3DSAm2r_refreshPage(void) {
+    double curropt = 0.0;
+    N3DSGml_getGlobal("curropt", -1, &curropt);
+    int32_t selected = (int32_t) curropt;
+    if (gAm2r.page == PAGE_DISPLAY) {
+        Instance* screen = N3DSAm2r_pageRow(DISPLAY_ROW_SCREEN);
+        if (screen != NULL) N3DSGml_setVarString(screen, "optext", kScreenModeNames[N3DSAm2r_screenModeSlot()]);
+        const char* tip = selected == DISPLAY_ROW_SCREEN ? "Stretch fills the screen; 1x and 2x keep square pixels; Wide shows more of the room"
+            : selected == DISPLAY_ROW_CHEATS ? "Unlimited health and ammo, stronger weapons"
+            : "Back to the options";
+        N3DSGml_setGlobalString("tiptext", tip);
+        return;
+    }
     for (int i = 0; i < CHEAT_COUNT; i++) {
         Instance* row = N3DSAm2r_pageRow(i);
         if (row == NULL) continue;
         N3DSGml_setVarString(row, "optext", gAm2r.cheats[i] ? "ON" : "OFF");
         N3DSGml_setVar(row, "enabled", (i == CHEAT_MASTER || gAm2r.cheats[CHEAT_MASTER]) ? 1.0 : 0.0);
     }
-    double curropt = 0.0;
-    N3DSGml_getGlobal("curropt", -1, &curropt);
-    int32_t selected = (int32_t) curropt;
     N3DSGml_setGlobalString("tiptext", selected >= 0 && selected < CHEAT_COUNT ? kCheatTips[selected] : "Back to the options");
 }
 
-// In place of the Display page (created by oOptionsMain at (50, 92)).
-static void N3DSAm2r_openCheatsPage(void) {
+// Pages built from the game's own row objects, where the game's pages go (oOptionsMain creates them at (50, 92)):
+// Display in place of the game's Display page (Screen, Cheats, Exit), and Cheats from it.
+static void N3DSAm2r_openPage(N3DSAm2rPage page, int32_t selected) {
     float x = N3DS_AM2R_PAGE_X, y = N3DS_AM2R_PAGE_Y - 8.0f;
     Instance* title = N3DSGml_create(x, y, gAm2r.objMenuLabel);
-    if (title != NULL) N3DSGml_setVarString(title, "text", "Cheats");
+    if (title != NULL) N3DSGml_setVarString(title, "text", page == PAGE_DISPLAY ? "Display" : "Cheats");
     gAm2r.pageTitle = title != NULL ? (int32_t) title->instanceId : -1;
-    for (int i = 0; i <= CHEAT_COUNT; i++) {
-        bool exitRow = i == CHEAT_COUNT;
-        Instance* row = N3DSGml_create(x, y + N3DS_AM2R_ROW_SEP * (float) (i + 1), exitRow ? gAm2r.objPauseOption : gAm2r.objOptionLR);
+    int count = N3DSAm2r_pageRowCount(page);
+    for (int i = 0; i < count; i++) {
+        bool lrRow = page == PAGE_DISPLAY ? i == DISPLAY_ROW_SCREEN : i < CHEAT_COUNT;
+        const char* label = i == count - 1 ? "Exit"
+            : page == PAGE_DISPLAY ? (i == DISPLAY_ROW_SCREEN ? "Screen" : "Cheats")
+            : kCheatLabels[i];
+        Instance* row = N3DSGml_create(x, y + N3DS_AM2R_ROW_SEP * (float) (i + 1), lrRow ? gAm2r.objOptionLR : gAm2r.objPauseOption);
         gAm2r.pageRows[i] = row != NULL ? (int32_t) row->instanceId : -1;
         if (row == NULL) continue;
         N3DSGml_setVar(row, "optionid", (double) i);
-        N3DSGml_setVarString(row, "label", exitRow ? "Exit" : kCheatLabels[i]);
+        N3DSGml_setVarString(row, "label", label);
     }
-    N3DSGml_setGlobal("curropt", 0.0);
-    gAm2r.pageOpen = true;
+    N3DSGml_setGlobal("curropt", (double) selected);
+    gAm2r.page = page;
     gAm2r.pageFrames = 0;
-    N3DSAm2r_refreshCheatsPage();
+    N3DSAm2r_refreshPage();
 }
 
-static void N3DSAm2r_closeCheatsPage(bool backToOptions) {
+static void N3DSAm2r_closePage(void) {
     N3DSGml_destroy(N3DSGml_instanceById(gAm2r.pageTitle));
-    for (int i = 0; i <= CHEAT_COUNT; i++) N3DSGml_destroy(N3DSAm2r_pageRow(i));
-    gAm2r.pageOpen = false;
+    for (int i = 0; i < N3DSAm2r_pageRowCount(gAm2r.page); i++) N3DSGml_destroy(N3DSAm2r_pageRow(i));
+    gAm2r.page = PAGE_NONE;
     N3DSAm2r_saveCheats();
-    if (backToOptions) N3DSGml_create(N3DS_AM2R_PAGE_X, N3DS_AM2R_PAGE_Y, gAm2r.objOptionsMain);
 }
 
 static bool N3DSAm2r_pressed(Instance* control, const char* key) {
@@ -385,10 +423,11 @@ static bool N3DSAm2r_pressed(Instance* control, const char* key) {
     return N3DSGml_getVar(control, key, &down) && down > 0.0 && N3DSGml_getVar(control, steps, &pushed) && pushed == 0.0;
 }
 
-static void N3DSAm2r_updateCheatsPage(void) {
+static void N3DSAm2r_updatePage(void) {
+    int count = N3DSAm2r_pageRowCount(gAm2r.page);
     // The page's instances go with the room (leaving the pause screen): nothing to go back to then.
-    if (N3DSAm2r_pageRow(CHEAT_COUNT) == NULL) {
-        gAm2r.pageOpen = false;
+    if (N3DSAm2r_pageRow(count - 1) == NULL) {
+        gAm2r.page = PAGE_NONE;
         N3DSAm2r_saveCheats();
         return;
     }
@@ -399,24 +438,39 @@ static void N3DSAm2r_updateCheatsPage(void) {
     double curropt = 0.0;
     N3DSGml_getGlobal("curropt", -1, &curropt);
     int32_t selected = (int32_t) curropt;
-    if (selected < 0 || selected > CHEAT_COUNT) selected = 0;
+    int32_t exitRow = count - 1;
+    if (selected < 0 || selected > exitRow) selected = 0;
+    bool menu1 = N3DSAm2r_pressed(control, "kMenu1");
+    bool left = N3DSAm2r_pressed(control, "kLeft"), right = N3DSAm2r_pressed(control, "kRight");
     if (N3DSAm2r_pressed(control, "kDown")) {
-        selected = selected >= CHEAT_COUNT ? 0 : selected + 1;
+        selected = selected >= exitRow ? 0 : selected + 1;
         N3DSAm2r_sfx(gAm2r.sndMenuMove);
     } else if (N3DSAm2r_pressed(control, "kUp")) {
-        selected = selected <= 0 ? CHEAT_COUNT : selected - 1;
+        selected = selected <= 0 ? exitRow : selected - 1;
         N3DSAm2r_sfx(gAm2r.sndMenuMove);
-    } else if (N3DSAm2r_pressed(control, "kMenu2") || (selected == CHEAT_COUNT && N3DSAm2r_pressed(control, "kMenu1"))) {
+    } else if (N3DSAm2r_pressed(control, "kMenu2") || (selected == exitRow && menu1)) {
+        // Back: from Cheats to Display, from Display to the options.
         N3DSAm2r_sfx(gAm2r.sndMenuSel);
-        N3DSAm2r_closeCheatsPage(true);
+        N3DSAm2rPage page = gAm2r.page;
+        N3DSAm2r_closePage();
+        if (page == PAGE_CHEATS) N3DSAm2r_openPage(PAGE_DISPLAY, DISPLAY_ROW_CHEATS);
+        else N3DSGml_create(N3DS_AM2R_PAGE_X, N3DS_AM2R_PAGE_Y, gAm2r.objOptionsMain);
         return;
-    } else if (selected < CHEAT_COUNT && (N3DSAm2r_pressed(control, "kMenu1") || N3DSAm2r_pressed(control, "kLeft") ||
-                                          N3DSAm2r_pressed(control, "kRight"))) {
+    } else if (gAm2r.page == PAGE_DISPLAY && selected == DISPLAY_ROW_CHEATS && menu1) {
+        N3DSAm2r_sfx(gAm2r.sndMenuSel);
+        N3DSAm2r_closePage();
+        N3DSAm2r_openPage(PAGE_CHEATS, 0);
+        return;
+    } else if (gAm2r.page == PAGE_DISPLAY && selected == DISPLAY_ROW_SCREEN && (menu1 || left || right)) {
+        int slot = N3DSAm2r_screenModeSlot() + (left ? N3DS_AM2R_SCREEN_MODES - 1 : 1);
+        N3DS_setScreenMode(kScreenModes[slot % N3DS_AM2R_SCREEN_MODES]);
+        N3DSAm2r_sfx(gAm2r.sndMenuSel);
+    } else if (gAm2r.page == PAGE_CHEATS && selected < CHEAT_COUNT && (menu1 || left || right)) {
         gAm2r.cheats[selected] = !gAm2r.cheats[selected];
         N3DSAm2r_sfx(gAm2r.sndMenuSel);
     }
     N3DSGml_setGlobal("curropt", (double) selected);
-    N3DSAm2r_refreshCheatsPage();
+    N3DSAm2r_refreshPage();
 }
 
 // ===[ Cheat effects ]===
@@ -483,13 +537,13 @@ void N3DSAm2r_update(void) {
     if (!gAm2r.active) return;
     N3DSAm2r_dropWaterFilter();
     N3DSAm2r_hideKeyboardRow();
-    if (gAm2r.pageOpen) {
-        N3DSAm2r_updateCheatsPage();
+    if (gAm2r.page != PAGE_NONE) {
+        N3DSAm2r_updatePage();
     } else if (gAm2r.objOptionsDisplay >= 0) {
         Instance* display = N3DSGml_anyInstance(gAm2r.objOptionsDisplay);
         if (display != NULL) {
             N3DSGml_destroy(display);
-            N3DSAm2r_openCheatsPage();
+            N3DSAm2r_openPage(PAGE_DISPLAY, DISPLAY_ROW_SCREEN);
         }
     }
     N3DSAm2r_applyCheats();

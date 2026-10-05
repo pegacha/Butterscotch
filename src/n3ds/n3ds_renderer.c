@@ -351,6 +351,7 @@ typedef struct {
     float presentY;
     float presentScale;
     bool stretchToScreen;
+    int32_t fixedScale; // 1x / 2x screen modes: the game's picture at this scale, centred (0: fit)
     // The game's "screen" (RENDER_TARGET_HOST_FRAMEBUFFER) is the bottom screen (AM2R's pause screen, 1:1).
     bool hostOnBottom;
     // The top screen as it was when the game paused (linear memory, 512x256 RGBA8), shown while paused.
@@ -5398,6 +5399,8 @@ static void N3DSRenderer_screenRect(const N3DSRenderer* renderer, int32_t w, int
     N3DSRenderer_computeLetterbox(w, h, screenW, screenH, &lx, &ly, &lw, &lh);
     float scale = (float) lw / (float) w;
     if (scale >= 1.0f) scale = floorf(scale);
+    // 1x / 2x: that scale, centred, whatever doesn't fit off screen (not on the bottom screen).
+    if (renderer->fixedScale > 0 && !renderer->hostOnBottom) scale = (float) renderer->fixedScale;
     *outW = (float) w * scale;
     *outH = (float) h * scale;
     *outX = floorf(((float) screenW - *outW) * 0.5f);
@@ -5406,6 +5409,10 @@ static void N3DSRenderer_screenRect(const N3DSRenderer* renderer, int32_t w, int
 
 void N3DSRenderer_setStretchToScreen(Renderer* base, bool stretch) {
     ((N3DSRenderer*) base)->stretchToScreen = stretch;
+}
+
+void N3DSRenderer_setFixedScale(Renderer* base, int32_t scale) {
+    ((N3DSRenderer*) base)->fixedScale = scale;
 }
 
 void N3DSRenderer_setHostScreenBottom(Renderer* base, bool bottom) {

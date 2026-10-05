@@ -1,0 +1,108 @@
+name: Build (Nintendo 3DS)
+
+# Builds the AM2R 3DS program (tools/n3ds/build.sh) on every push. A pushed tag or a published release also
+# gets a GitHub release with am2r.cia, am2r.3dsx, the ELF (for symbolizing crashes) and a QR code for
+# FBI's Remote Install.
+
+on:
+  push:
+    branches: ['**']
+    tags: ['*']
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: n3ds-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build-n3ds:
+    name: Build (Nintendo 3DS, AM2R)
+    runs-on: ubuntu-24.04
+    container:
+      image: devkitpro/devkitarm:latest
+    permissions:
+      contents: write
+    env:
+      # makerom (CIA packaging) isn't part of devkitPro: built from 3DSGuy/Project_CTR at this tag.
+      MAKEROM_REF: makerom-v0.19.0
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Get commit info
+        id: commit-info
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          echo "hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "date=$(git log -1 --format=%cd --date=format:'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
+
+      - name: Build makerom
+        run: |
+          git clone --quiet --depth 1 --branch "$MAKEROM_REF" https://github.com/3DSGuy/Project_CTR.git /opt/project_ctr
+          make -C /opt/project_ctr/makerom deps
+          make -C /opt/project_ctr/makerom program
+          test -x /opt/project_ctr/makerom/bin/makerom
+
+      - name: Build
+        run: |
+          tools/n3ds/build.sh build \
+            -DN3DS_TOOLS_DIR=/opt/project_ctr/makerom/bin \
+            "-DBUTTERSCOTCH_COMMIT_HASH=${{ steps.commit-info.outputs.hash }}" \
+            "-DBUTTERSCOTCH_COMMIT_DATE=${{ steps.commit-info.outputs.date }}"
+          mkdir -p out
+          cp build/am2r.cia build/am2r.3dsx out/
+          cp build/butterscotch.elf out/am2r.elf
+          ls -la out
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: am2r-3ds
+          path: out/
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends gh qrencode
+
+          base="https://github.com/$GH_REPO/releases/download/$TAG"
+          # FBI: Remote Install -> Scan QR Code reads a URL and installs the CIA it downloads.
+          qrencode -s 8 -m 4 -o out/am2r-cia-qr.png "$base/am2r.cia"
+
+          marker="<!-- n3ds-build -->"
+          {
+            echo "$marker"
+            echo "## Install with FBI"
+            echo
+            echo "FBI → Remote Install → Scan QR Code:"
+            echo
+            echo "![QR code for am2r.cia]($base/am2r-cia-qr.png)"
+            echo
+            echo "Direct link: $base/am2r.cia"
+            echo
+            echo "## SD card"
+            echo
+            echo "The game's files go in \`sdmc:/3ds/am2r/\`, made from AM2R 1.1 with \`tools/n3ds/make_sd.sh\`."
+            echo "This build needs SD data revision $(cat tools/n3ds/sd_data_rev.txt) (\`sd_data_rev.txt\` on the card)."
+            echo
+            echo "Built from ${{ steps.commit-info.outputs.hash }}."
+          } > notes.md
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # A release made on GitHub: keep its text, add the install section once.
+            gh release view "$TAG" --json body --jq .body > existing.md
+            if ! grep -qF "$marker" existing.md; then
+              { cat existing.md; echo; echo; cat notes.md; } > combined.md
+              gh release edit "$TAG" --notes-file combined.md
+            fi
+          else
+            gh release create "$TAG" --title "AM2R for 3DS $TAG" --notes-file notes.md
+          fi
+          gh release upload "$TAG" --clobber out/am2r.cia out/am2r.3dsx out/am2r.elf out/am2r-cia-qr.png

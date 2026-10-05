@@ -16,6 +16,11 @@ static files (`data.win`, `lang/`, preprocessed `gfx/` and `audio/`) plus saves 
 folder's `sd_data_rev.txt` against `tools/n3ds/sd_data_rev.txt` and stops with a message if the card is stale, so a
 preprocessor change means a new revision and a new SD folder.
 
+CI (`.github/workflows/build-n3ds.yml`): every push builds the AM2R profile in the `devkitpro/devkitarm` container
+(makerom built from 3DSGuy/Project_CTR at a pinned tag) and uploads `am2r.cia`, `am2r.3dsx` and `am2r.elf` as the
+`am2r-3ds` artifact. A pushed tag (or a release published on GitHub) also gets a release with those files and a QR
+code of the CIA's download link for FBI (Remote Install -> Scan QR Code).
+
 Emulator loop (Windows host, WSL build): `tools/n3ds/run_in_azahar.ps1` installs the CIA into Azahar (New 3DS mode,
 Vulkan) and collects `log.txt`, screenshots and Azahar's log (`-Harness`, `-Save`, `-ClearSaves`, `-Inputs`,
 `-WaitSeconds` hard limit, `-CpuClock`: **100 approximates hardware**; 300 hides CPU-bound problems).

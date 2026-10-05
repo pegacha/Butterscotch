@@ -28,6 +28,10 @@ typedef struct {
     int32_t gml; // GameMaker virtual key
 } N3DSKeyMap;
 
+// With N3DS_KEYBOARD_MIRROR the D-pad/circle pad, Start and Select are also the keyboard's arrows, Enter and Escape.
+// Off for AM2R: it treats any held keyboard binding as "playing on keyboard" (global.controltype = 0) and shows
+// keyboard prompts.
+#ifdef N3DS_KEYBOARD_MIRROR
 static const N3DSKeyMap gKeyMap[] = {
     { KEY_DUP, VK_UP },
     { KEY_DDOWN, VK_DOWN },
@@ -36,6 +40,7 @@ static const N3DSKeyMap gKeyMap[] = {
     { KEY_START, VK_ENTER },
     { KEY_SELECT, VK_ESCAPE },
 };
+#endif
 
 typedef struct {
     int32_t kind; // 0 press, 1 screenshot, 2 exit, 3 touch
@@ -272,12 +277,14 @@ u32 N3DSInput_update(Runner* runner) {
     if (circle.dx > 80) dirs |= KEY_DRIGHT;
     if (circle.dy > 80) dirs |= KEY_DUP;
     if (circle.dy < -80) dirs |= KEY_DDOWN;
+#ifdef N3DS_KEYBOARD_MIRROR
     repeat(sizeof(gKeyMap) / sizeof(gKeyMap[0]), i) {
         bool now = (dirs & gKeyMap[i].key) != 0;
         bool before = (gKeysHeldPrev & gKeyMap[i].key) != 0;
         if (now && !before) RunnerKeyboard_onKeyDown(runner->keyboard, gKeyMap[i].gml);
         if (!now && before) RunnerKeyboard_onKeyUp(runner->keyboard, gKeyMap[i].gml);
     }
+#endif
     u32 down = dirs & ~gKeysHeldPrev;
     gKeysHeldPrev = dirs;
 

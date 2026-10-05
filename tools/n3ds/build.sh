@@ -9,12 +9,13 @@ src="$(cd "$(dirname "$0")/../.." && pwd)"
 build="${1:-$src/../build-n3ds}"
 shift || true
 
-# One WAD version per build lets the compiler fold the interpreter's version checks, as upstream does for its
-# console builds.
+# Only the WAD versions a profile needs: fewer lets the compiler fold the interpreter's version checks, as upstream does
+# for its console builds.
 case "${BS_N3DS_GAME:-am2r}" in
     am2r)
         profile=(
-            -DENABLE_WAD14=ON -DENABLE_WAD16=OFF -DENABLE_WAD17=OFF
+            # WAD 14 is AM2R 1.1, WAD 15 (built into the WAD 16 support) is the Community Updates (1.5.x).
+            -DENABLE_WAD14=ON -DENABLE_WAD16=ON -DENABLE_WAD17=OFF
             "-DN3DS_APP_NAME=AM2R"
             "-DN3DS_APP_DESCRIPTION=Another Metroid 2 Remake"
             "-DN3DS_APP_AUTHOR=DoctorM64"
@@ -25,6 +26,8 @@ case "${BS_N3DS_GAME:-am2r}" in
             # AM2R lays out its own 320x240 display (application_surface and HUD surface at its own offsets), so
             # the widescreen hack can't widen it: stretch it to the screen instead.
             -DN3DS_SCREEN_MODE=stretch
+            # AM2R switches its button prompts to the keyboard's while any keyboard binding is held: gamepad only.
+            -DN3DS_KEYBOARD_MIRROR=OFF
         )
         ;;
     *)

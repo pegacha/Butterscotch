@@ -42,6 +42,11 @@ foreach(_opt ENABLE_VM_GML_PROFILER ENABLE_VM_TRACING ENABLE_VM_OPCODE_PROFILER 
     endif()
 endforeach()
 
+option(N3DS_KEYBOARD_MIRROR "D-pad, Start and Select also press the keyboard's arrows, Enter and Escape" ON)
+if(N3DS_KEYBOARD_MIRROR)
+    target_compile_definitions(butterscotch PRIVATE N3DS_KEYBOARD_MIRROR)
+endif()
+
 option(N3DS_POISON_MALLOC "Fill new heap memory with a pattern, like reused memory on hardware (debug)" OFF)
 if(N3DS_POISON_MALLOC)
     target_compile_definitions(butterscotch PRIVATE N3DS_POISON_MALLOC)

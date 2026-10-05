@@ -26,6 +26,10 @@ jobs:
       image: devkitpro/devkitarm:latest
     permissions:
       contents: write
+    defaults:
+      run:
+        # A container job's default shell is sh.
+        shell: bash
     env:
       # makerom (CIA packaging) isn't part of devkitPro: built from 3DSGuy/Project_CTR at this tag.
       MAKEROM_REF: makerom-v0.19.0

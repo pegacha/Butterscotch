@@ -711,6 +711,11 @@ struct Runner {
     SpatialGrid* spatialGrid;
     uint32_t collisionQueryCounter;
     int32_t pendingRoom;  // -1 = none
+    // The current room's tiles as it was entered (non-persistent rooms): tile_delete/tile_add/... change the room's
+    // own tile list, and a room that isn't persistent starts over with its original tiles every time it's entered.
+    RoomTile* roomTilesSnapshot;
+    uint32_t roomTilesSnapshotCount;
+    int32_t roomTilesSnapshotRoom; // -1 = none
     bool gameStartFired;
     int frameCount;
     uint32_t nextInstanceId;

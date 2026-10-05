@@ -1610,6 +1610,36 @@ static void copyRoomViewToRuntimeView(RoomView* roomView, RuntimeView* runtimeVi
     runtimeView->portHeight = roomView->portHeight;
 }
 
+// Puts back the tiles the current snapshot's room had when it was entered (it's being left), unless it has become
+// persistent: GameMaker rebuilds a non-persistent room from its definition on every entry, so tiles deleted in one
+// visit (AM2R's broken blocks delete the tile drawn over them) are there again on the next.
+static void restoreRoomTiles(Runner* runner) {
+    int32_t roomIndex = runner->roomTilesSnapshotRoom;
+    if (roomIndex >= 0 && runner->dataWin->room.count > (uint32_t) roomIndex) {
+        Room* room = &runner->dataWin->room.rooms[roomIndex];
+        if (!room->persistent && room->payloadLoaded) {
+            room->tiles = (RoomTile*) safeRealloc(room->tiles, (runner->roomTilesSnapshotCount > 0 ? runner->roomTilesSnapshotCount : 1) * sizeof(RoomTile));
+            if (runner->roomTilesSnapshotCount > 0) memcpy(room->tiles, runner->roomTilesSnapshot, runner->roomTilesSnapshotCount * sizeof(RoomTile));
+            room->tileCount = runner->roomTilesSnapshotCount;
+        }
+    }
+    free(runner->roomTilesSnapshot);
+    runner->roomTilesSnapshot = nullptr;
+    runner->roomTilesSnapshotCount = 0;
+    runner->roomTilesSnapshotRoom = -1;
+}
+
+static void snapshotRoomTiles(Runner* runner, int32_t roomIndex, Room* room) {
+    restoreRoomTiles(runner);
+    if (room->persistent) return;
+    runner->roomTilesSnapshotRoom = roomIndex;
+    runner->roomTilesSnapshotCount = room->tileCount;
+    if (room->tileCount > 0) {
+        runner->roomTilesSnapshot = (RoomTile*) safeMalloc(room->tileCount * sizeof(RoomTile));
+        memcpy(runner->roomTilesSnapshot, room->tiles, room->tileCount * sizeof(RoomTile));
+    }
+}
+
 static void initRoom(Runner* runner, int32_t roomIndex) {
     DataWin* dataWin = runner->dataWin;
     require(roomIndex >= 0 && dataWin->room.count > (uint32_t) roomIndex);
@@ -1620,6 +1650,7 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     if (!room->payloadLoaded) {
         DataWin_loadRoomPayload(dataWin, roomIndex);
     }
+    snapshotRoomTiles(runner, roomIndex, room);
 
     SavedRoomState* savedState = &runner->savedRoomStates[roomIndex];
 
@@ -2245,6 +2276,7 @@ void Runner_reset(Runner* runner) {
     VM_reset(runner->vmContext);
 
     runner->pendingRoom = -1;
+    runner->roomTilesSnapshotRoom = -1;
     runner->asyncLoadMapId = -1;
     runner->eventDataMapId = -1;
     runner->asyncBufferNextRequestId = 1;
@@ -2490,6 +2522,7 @@ Runner* Runner_create(DataWin* dataWin, VMContext* vm, Renderer* renderer, FileS
     validateRendererVtable(renderer);
 
     Runner* runner = (Runner *)safeCalloc(1, sizeof(Runner));
+    runner->roomTilesSnapshotRoom = -1;
     runner->dataWin = dataWin;
     runner->vmContext = vm;
     runner->renderer = renderer;
@@ -3941,6 +3974,7 @@ static void persistRoomState(Runner* runner, int32_t roomIndex) {
 void Runner_handlePendingRoomChange(Runner* runner) {
     // Handle game restart
     if (runner->pendingRoom == ROOM_RESTARTGAME) {
+        restoreRoomTiles(runner);
         // See you soon!
         // Free the currently-loaded non-eager room before reset so lazyLoadRooms stays steady-state.
         if (runner->dataWin->lazyLoadRooms && runner->currentRoom != nullptr && !runner->currentRoom->eagerlyLoaded) {
@@ -3974,6 +4008,8 @@ void Runner_handlePendingRoomChange(Runner* runner) {
         if (oldRoom->persistent) {
             persistRoomState(runner, oldRoomIndex);
         }
+        // A non-persistent room gets its original tiles back for its next visit (before a lazily loaded payload goes).
+        restoreRoomTiles(runner);
 
         // Free the outgoing room's payload under lazyLoadRooms, unless it's eagerly pinned or we're restarting the same room (initRoom would just re-load it).
         if (runner->dataWin->lazyLoadRooms && !oldRoom->eagerlyLoaded && newRoomIndex != oldRoomIndex) {

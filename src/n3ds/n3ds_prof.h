@@ -15,6 +15,8 @@ typedef enum {
 } N3DSProfCounter;
 
 extern u64 gN3DSProfTicks[N3DS_PROF_COUNT];
+// citro2d batch flushes this frame (each a GPU draw call: blend mode, texture and target changes force one).
+extern u32 gN3DSProfFlushes;
 
 static inline u64 N3DSProf_begin(void) {
     return svcGetSystemTick();

@@ -2098,6 +2098,7 @@ static void N3DSRenderer_setDefaultGPUState(N3DSRenderer* renderer) {
 
 static void N3DSRenderer_flushC2DQueue(N3DSRenderer* renderer) {
     if (renderer == NULL || renderer->pendingC2DDraws == 0) return;
+    gN3DSProfFlushes++;
     C2D_Flush();
     renderer->pendingC2DDraws = 0;
     renderer->lastDrawTexture = NULL;

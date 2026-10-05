@@ -66,6 +66,7 @@ static int gN3DSBootLogLineCount = 0;
 #define N3DS_MONITOR_LINES 8
 
 u64 gN3DSProfTicks[N3DS_PROF_COUNT];
+u32 gN3DSProfFlushes;
 
 // Where one frame's time went, in ms. Step is the game logic (GML), wait is citro3d waiting for the GPU and VBlank,
 // draw is building the GPU commands; IO, TX, FS and AU are slices of those (see n3ds_prof.h).
@@ -454,7 +455,7 @@ N3DSScreenMode N3DS_getScreenMode(void) {
 }
 
 void N3DS_setScreenMode(N3DSScreenMode mode) {
-    if ((int) mode < 0 || (int) mode >= (int) N3DS_SCREEN_MODE_COUNT || mode == gScreenMode) return;
+    if ((unsigned) mode >= (unsigned) N3DS_SCREEN_MODE_COUNT || mode == gScreenMode) return;
     gScreenMode = mode;
     logInfo("Screen mode: %s\n", N3DS_screenModeName(gScreenMode));
 }
@@ -705,6 +706,7 @@ int main(int argc, char** argv) {
 
         u64 frameStartTick = svcGetSystemTick();
         memset(gN3DSProfTicks, 0, sizeof(gN3DSProfTicks));
+        gN3DSProfFlushes = 0;
         uint64_t frameStartNow = nowNanos();
         if (gN3DSResumed) {
             gN3DSResumed = false;
@@ -841,16 +843,17 @@ int main(int argc, char** argv) {
         };
         N3DSDebugMonitor_tickFrame(&debugMonitor, frameTimes);
         if (frameTimes[N3DS_FT_FRAME] > statsMaxFrameMs) statsMaxFrameMs = frameTimes[N3DS_FT_FRAME];
-        // A frame over 100 ms is a visible hitch: say where it went (at most twice a second, so a long stall
-        // doesn't turn into SD writes of its own).
+        // A frame over 25 ms (under 40 fps) is a hitch or a slowdown: say where it went (at most twice a second, so a
+        // long stall doesn't turn into SD writes of its own).
         u64 frameEndMs = osGetTime();
-        if (roomChanged || (frameTimes[N3DS_FT_FRAME] > 100.0 && frameEndMs - lastSlowLogMs >= 500u)) {
+        if (roomChanged || (frameTimes[N3DS_FT_FRAME] > 25.0 && frameEndMs - lastSlowLogMs >= 500u)) {
             if (!roomChanged) lastSlowLogMs = frameEndMs;
-            logInfo("%s %d (%s): %.1f ms = step %.1f + wait %.1f + draw %.1f (room change %.1f, texture gc %.1f, file flush %.1f) + prewarm %.1f; io %.1f, tex %.1f, fs %.1f, audio %.1f\n",
+            logInfo("%s %d (%s): %.1f ms = step %.1f + wait %.1f + draw %.1f (room change %.1f, texture gc %.1f, file flush %.1f) + prewarm %.1f; io %.1f, tex %.1f, fs %.1f, audio %.1f; %lu instances, %lu GPU flushes\n",
                 roomChanged ? "Room frame" : "Slow frame", (int) runner->frameCount,
                 runner->currentRoom != NULL ? runner->currentRoom->name : "-",
                 frameTimes[N3DS_FT_FRAME], stepMs, waitMs, drawMs, roomChangeMs, gcMs, fsFlushMs, frameTimes[N3DS_FT_PREWARM],
-                frameTimes[N3DS_FT_IO], frameTimes[N3DS_FT_TEX], frameTimes[N3DS_FT_FS], frameTimes[N3DS_FT_AUDIO]);
+                frameTimes[N3DS_FT_IO], frameTimes[N3DS_FT_TEX], frameTimes[N3DS_FT_FS], frameTimes[N3DS_FT_AUDIO],
+                (unsigned long) arrlen(runner->instances), (unsigned long) gN3DSProfFlushes);
         }
 
         if (N3DSInput_exitRequested()) {

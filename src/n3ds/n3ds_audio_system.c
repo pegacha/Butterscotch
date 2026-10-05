@@ -3883,6 +3883,18 @@ static int32_t N3DSAudio_playSoundTimed(AudioSystem* base, int32_t soundIndex, i
     return result;
 }
 
+static void N3DSAudio_stopSoundTimed(AudioSystem* base, int32_t soundOrInstance) {
+    u64 start = N3DSProf_begin();
+    N3DSAudio_stopSound(base, soundOrInstance);
+    N3DSProf_end(N3DS_PROF_AUDIO, start);
+}
+
+static void N3DSAudio_stopAllTimed(AudioSystem* base) {
+    u64 start = N3DSProf_begin();
+    N3DSAudio_stopAll(base);
+    N3DSProf_end(N3DS_PROF_AUDIO, start);
+}
+
 static void N3DSAudio_updateTimed(AudioSystem* base, float deltaTime) {
     u64 start = N3DSProf_begin();
     N3DSAudio_update(base, deltaTime);
@@ -3894,8 +3906,8 @@ static AudioSystemVtable N3DSAudio_vtable = {
     .destroy = N3DSAudio_destroy,
     .update = N3DSAudio_updateTimed,
     .playSound = N3DSAudio_playSoundTimed,
-    .stopSound = N3DSAudio_stopSound,
-    .stopAll = N3DSAudio_stopAll,
+    .stopSound = N3DSAudio_stopSoundTimed,
+    .stopAll = N3DSAudio_stopAllTimed,
     .isPlaying = N3DSAudio_isPlaying,
     .pauseSound = N3DSAudio_pauseSound,
     .resumeSound = N3DSAudio_resumeSound,

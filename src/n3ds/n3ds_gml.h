@@ -14,6 +14,8 @@ void N3DSGml_init(Runner* runner);
 int32_t N3DSGml_objectIndex(const char* name);
 // Index of the room with this name, -1 if none.
 int32_t N3DSGml_roomIndex(const char* name);
+// Index of the sprite with this name, -1 if none.
+int32_t N3DSGml_spriteIndex(const char* name);
 
 // First active, live instance of an object (by index), NULL if none.
 Instance* N3DSGml_firstInstance(int32_t objectIndex);
@@ -25,6 +27,9 @@ int32_t N3DSGml_instances(int32_t objectIndex, Instance** out, int32_t max);
 // global.<name> (or global.<name>[index] with index >= 0) as a number.
 bool N3DSGml_getGlobal(const char* name, int32_t index, double* out);
 void N3DSGml_setGlobal(const char* name, double value);
+// The value slot of global.<name> (NULL if it isn't set): read many elements of a global array without a lookup each.
+// Valid until the game next assigns that global.
+RValue* N3DSGml_globalSlot(const char* name);
 // <inst>.<name> as a number.
 bool N3DSGml_getVar(Instance* inst, const char* name, double* out);
 void N3DSGml_setVar(Instance* inst, const char* name, double value);

@@ -23,3 +23,5 @@ bool N3DSPause_update(void);
 bool N3DSPause_isPaused(void);
 // Whether the bottom screen should show the pause screen's map page as it last was (during play).
 bool N3DSPause_showMapOnBottom(void);
+// In a game (global.ingame) and not on the pause screen.
+bool N3DSPause_inPlay(void);

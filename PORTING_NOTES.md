@@ -3,7 +3,8 @@
 From upstream [ButterscotchRunner/Butterscotch](https://github.com/ButterscotchRunner/Butterscotch) `main` at `d8575ec`
 (this repository's `main` was the `port/n3ds` branch). 3DS backend from
 [Project-Sunshine-Native/cinnamon](https://github.com/Project-Sunshine-Native/cinnamon) `UNDERTALE-3DS` (`f139a60`).
-First target: AM2R 1.1 (WAD 14), New 3DS (804 MHz, L2 cache, 124 MB mode, core 2).
+First target: AM2R 1.1 (WAD 14) and AM2R Community Updates 1.5.x (GameMaker: Studio 1.4.1763, WAD 15; the AM2R build
+enables both), New 3DS (804 MHz, L2 cache, 124 MB mode, core 2).
 
 ## Build and run
 
@@ -62,6 +63,11 @@ movie via `ltm_to_inputs.py`. `-DENABLE_VM_GML_PROFILER=ON` logs a GML profile e
   - options and submenus: tap a row to select, tap again to activate; touch and hold the left/right half of a
     selected value box to turn it down/up (the volume sliders only move while the direction is held).
   Touch must never become a mouse: AM2R moves Samus to the mouse while button 1 is held (a debug leftover).
+- Bottom screen during play (`n3ds_livemap.c`): the map, drawn from the game's own map data the way
+  `draw_map_surf`/`draw_mapblock` draw it (`global.map[x, y]` cell strings, `global.dmap` explored state, the map
+  sprites), centred on Samus's cell (`global.mapposx/y`) with `sMapHilight` and the marker. It is redrawn when Samus
+  changes cell and once a second; the finished frame is kept as the bottom-screen picture in between (only the
+  highlight is drawn every frame). A tap pauses the game (the pause screen opens on its map page).
 - Start+Select toggles the debug monitor (on the top screen while paused). Start and Select reach the game 3 frames
   late, press for press, so the chord is caught before the game sees either.
 - "Saving..." (small, top screen, bottom-right) while the game's files have changes not yet on the SD card.
@@ -77,12 +83,15 @@ movie via `ltm_to_inputs.py`. `-DENABLE_VM_GML_PROFILER=ON` logs a GML profile e
   differ from the card (flushed at exit too), by a writer thread from a snapshot. AM2R's `crypt` script XORs its 236 KB save in place a byte at a time
   with a seek per byte, and decrypts/re-encrypts on every save read: seconds per read through stdio, nothing now.
 - Input: 3DS buttons -> gamepad slot 0 by position (B = face1, A = face2, Y = face3, X = face4, L/R, ZL/ZR,
-  Select, Start, D-pad, circle pad/C-stick axes) plus keyboard arrows/Enter/Escape. AM2R binds its actions in its
+  Select, Start, D-pad, circle pad/C-stick axes); `N3DS_KEYBOARD_MIRROR` (off for AM2R) also presses the keyboard's
+  arrows/Enter/Escape: AM2R sets `global.controltype` to keyboard whenever a keyboard binding is held and then shows
+  keyboard button prompts. AM2R binds its actions in its
   own `config.ini`; `res/n3ds/am2r/sd/config.ini` seeds a 3DS layout (B jump, Y fire, A morph, L/ZL aim, R
   missiles, ZR aim lock, Select weapon, Start pause; menus A = OK, B = back) when the card has none.
 - Audio: NDSP (Cinnamon's system on upstream's interface). Sound effects: a DSP-ADPCM bank read once into linear
   memory and played in place. Music (GameMaker streamed sounds, `AUDIO_ENTRY_FLAG_IS_EMBEDDED` clear): BCWAV
-  DSP-ADPCM files streamed from the SD by a worker thread on core 2.
+  DSP-ADPCM files streamed from the SD by a worker thread on core 2. `audio_sound_gain(snd, gain, time)` fades over
+  `time` (AM2R crossfades music over 3 s).
 - Textures: the preprocessor packs atlas pages (ETC1A4/RGBA5551/LA4/L4, RGBA8 where an image has partial alpha)
   into `gfx/atlas.bin`; sprite sheets into `gfx/direct_assets.bin`; `room_manifest.bin` lists each room's pages.
   On a room change the room's pages are queued for a background loader thread (own handle on `atlas.bin`, core 2,
@@ -137,4 +146,3 @@ screens and room changes, pause screen ~7.5 fps.
 - A room change on hardware once left the game in the transition room (Samus gone, old view shown, game still
   running); not reproduced in Azahar.
 - Start/Select reach the game 3 frames (50 ms) late (Start+Select chord detection).
-- `file_text_open_append` is not an upstream builtin (AM2R's `writelog` silently writes nothing).

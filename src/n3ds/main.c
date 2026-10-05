@@ -15,6 +15,7 @@
 #include "n3ds_audio_system.h"
 #include "n3ds_cached_file_system.h"
 #include "n3ds_input.h"
+#include "n3ds_livemap.h"
 #include "n3ds_pause.h"
 #include "n3ds_platform_config.h"
 #include "n3ds_prof.h"
@@ -642,6 +643,7 @@ int main(int argc, char** argv) {
     Runner_setGameArgs(runner, gameArgs, (int32_t) arrlen(gameArgs));
     N3DSInput_init(runner);
     N3DSPause_init(runner, renderer);
+    N3DSLiveMap_init(runner, renderer);
     logInfo("Screen mode: %s\n", N3DS_screenModeName(gScreenMode));
     N3DSSavingIndicator savingIndicator = {0};
 #ifdef ENABLE_VM_GML_PROFILER
@@ -697,6 +699,7 @@ int main(int argc, char** argv) {
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
         double waitMs = (double) (svcGetSystemTick() - waitStartTick) * 1000.0 / (double) SYSCLOCK_ARM11;
         N3DSScreenshot_captureIfRequested(renderer);
+        N3DSLiveMap_beginFrame();
         // Before the step: freezes the top screen when the pause screen opens and turns touches into its presses.
         bool paused = N3DSPause_update();
         u64 stepStartTick = svcGetSystemTick();
@@ -776,7 +779,8 @@ int main(int argc, char** argv) {
         if (runner->frameCount % 300 == 5) N3DSRenderer_logDiag(renderer);
 #endif
         if (paused) N3DSRenderer_drawFrozenTop(renderer);
-        if (N3DSPause_showMapOnBottom()) N3DSRenderer_drawBottomSnapshot(renderer);
+        if (N3DSPause_inPlay() && N3DSLiveMap_available()) N3DSLiveMap_draw();
+        else if (N3DSPause_showMapOnBottom()) N3DSRenderer_drawBottomSnapshot(renderer);
         if (debugMonitorVisible) N3DSDebugMonitor_draw(&debugMonitor, runner, renderer, paused);
         N3DSSavingIndicator_draw(&savingIndicator, renderer, N3DSCachedFileSystem_isSaving(fileSystem));
         renderer->vtable->flush(renderer);

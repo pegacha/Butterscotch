@@ -27,9 +27,9 @@
 // Touch here: tap a row to select it, tap the selected row to activate it (touch and hold the left/right half of
 // its value box to turn the value down/up); the hint strip at the bottom (which shows the Menu2 hint) is Menu2; drag the map to pan it and
 // tap a cell to put the marker there (tap the marker to delete it); drag a log list or an expanded log to scroll.
-// During play the bottom screen shows the pause screen's map page as it last was (AM2R runs one room at a time,
-// so it can't be live): it is captured while the pause screen is on its map page, and a tap on the bottom screen
-// pauses the game (the pause screen opens on the map).
+// During play the bottom screen shows the map, drawn live from the game's map data (n3ds_livemap.c); without that
+// data, the pause screen's map page as it last was (captured while the pause screen is on its map page). A tap on
+// the bottom screen pauses the game (the pause screen opens on the map).
 // Note: AM2R has a debug leftover that moves Samus to the mouse while mouse button 1 is held, so touch must never
 // become a mouse.
 
@@ -549,6 +549,10 @@ static void N3DSPause_watchSamus(void) {
         samus->x < 0.0f || samus->y < 0.0f ? "off the room" : "missing", samus->x, samus->y, (int) samus->active,
         (int) samus->visible, runner->currentRoom->name, (int) runner->currentRoom->width, (int) runner->currentRoom->height,
         (int) runner->frameCount, vx, vy, target, transition, tx, ty, deactivate);
+}
+
+bool N3DSPause_inPlay(void) {
+    return gPause.inGame && !gPause.paused;
 }
 
 bool N3DSPause_showMapOnBottom(void) {

@@ -56,6 +56,15 @@ Instance* N3DSGml_firstInstance(int32_t objectIndex) {
     return N3DSGml_instances(objectIndex, &inst, 1) == 1 ? inst : NULL;
 }
 
+int32_t N3DSGml_spriteIndex(const char* name) {
+    if (gRunner == NULL) return -1;
+    Sprt* sprt = &gRunner->dataWin->sprt;
+    for (uint32_t i = 0; i < sprt->count; i++) {
+        if (sprt->sprites[i].name != NULL && strcmp(sprt->sprites[i].name, name) == 0) return (int32_t) i;
+    }
+    return -1;
+}
+
 static int32_t N3DSGml_varId(const char* name) {
     if (gRunner == NULL || gRunner->vmContext == NULL) return -1;
     ptrdiff_t slot = shgeti(gRunner->vmContext->varNameMap, (char*) name);
@@ -76,6 +85,13 @@ static bool N3DSGml_readSlot(Instance* inst, const char* name, int32_t index, do
 bool N3DSGml_getGlobal(const char* name, int32_t index, double* out) {
     if (gRunner == NULL || gRunner->vmContext == NULL) return false;
     return N3DSGml_readSlot((Instance*) gRunner->vmContext->globalScopeInstance, name, index, out);
+}
+
+RValue* N3DSGml_globalSlot(const char* name) {
+    if (gRunner == NULL || gRunner->vmContext == NULL || gRunner->vmContext->globalScopeInstance == NULL) return NULL;
+    int32_t varId = N3DSGml_varId(name);
+    if (varId < 0) return NULL;
+    return IntRValueHashMap_findSlot(&((Instance*) gRunner->vmContext->globalScopeInstance)->selfVars, varId);
 }
 
 void N3DSGml_setGlobal(const char* name, double value) {

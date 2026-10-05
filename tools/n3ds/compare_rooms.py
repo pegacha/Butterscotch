@@ -7,7 +7,10 @@ harness.txt on Azahar's SD card in screen mode 1x, so its top screen holds the g
 Each screenshot is paired with the room it was taken in (from the "Room changed" / "Screenshot saved" log lines: Samus
 keeps her position across a goto and can walk into a door), and the pairs are ranked by how much they differ.
 
-Output (--out): report.html (worst first: desktop | 3DS | difference x3), summary.csv, desktop/, 3ds/, logs.
+Rooms are ranked by content present on one side and not the other (sprites, objects, effects), not by colour: edge
+maps are compared with a few pixels' tolerance, and the largest connected block of 8x8 cells with unmatched edges is
+the score. Output (--out): report.html (worst first: desktop | 3DS | 3DS with the differences boxed), summary.csv
+(also the plain colour differences), desktop/, 3ds/, logs.
 
 usage (Linux, from this repository; needs Python 3 with Pillow, Xvfb for the desktop window):
   tools/n3ds/compare_rooms.py --game ~/am2r --desktop build-desktop/butterscotch \\
@@ -30,7 +33,7 @@ import subprocess
 import sys
 import time
 
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageFilter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -167,6 +170,54 @@ def rooms_at_shots(logpath):
     return result
 
 
+CELL = 8          # missing-content grid (8x8 pixel cells)
+EDGE = 40         # an edge: grey-level gradient above this
+NEAR = 7          # an edge counts as present if the other image has one within 3 px (animation, sub-pixel offsets)
+
+
+def edges(img):
+    g = img.convert("L").filter(ImageFilter.FIND_EDGES)
+    return g.point(lambda v: 255 if v > EDGE else 0)
+
+
+def missing_cells(a_edges, b_edges_near):
+    """8x8 cells where a has edges that b has nothing near: the content b lacks (colour doesn't matter)."""
+    w, h = a_edges.size
+    ap = a_edges.load()
+    bp = b_edges_near.load()
+    cells = set()
+    for cy in range(0, h, CELL):
+        for cx in range(0, w, CELL):
+            total = lost = 0
+            for y in range(cy, min(cy + CELL, h)):
+                for x in range(cx, min(cx + CELL, w)):
+                    if ap[x, y]:
+                        total += 1
+                        if not bp[x, y]:
+                            lost += 1
+            if total >= 6 and lost * 10 >= total * 6:
+                cells.add((cx // CELL, cy // CELL))
+    return cells
+
+
+def largest_cluster(cells):
+    best, seen = 0, set()
+    for c in cells:
+        if c in seen:
+            continue
+        stack, size = [c], 0
+        seen.add(c)
+        while stack:
+            x, y = stack.pop()
+            size += 1
+            for n in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if n in cells and n not in seen:
+                    seen.add(n)
+                    stack.append(n)
+        best = max(best, size)
+    return best
+
+
 def compare(args, shots):
     desk_rooms = rooms_at_shots(os.path.join(args.out, "desktop.log"))
     ds_rooms = rooms_at_shots(os.path.join(args.out, "3ds.log"))
@@ -177,7 +228,8 @@ def compare(args, shots):
         dp = os.path.join(args.out, "desktop", f"frame_{frame}.png")
         tp = os.path.join(args.out, "3ds", f"frame_{frame:05d}.png")
         row = {"room": room, "frame": frame, "desktop_room": desk_rooms.get(frame), "3ds_room": ds_rooms.get(frame),
-               "mean_diff": None, "pct_differing": None, "image": ""}
+               "missing_on_3ds": None, "extra_on_3ds": None, "missing_cells": None, "mean_diff": None, "pct_differing": None,
+               "image": ""}
         if os.path.exists(dp) and os.path.exists(tp):
             d = Image.open(dp).convert("RGB")
             if d.size != (320, 240):
@@ -187,14 +239,33 @@ def compare(args, shots):
             px = list(diff.get_flattened_data() if hasattr(diff, "get_flattened_data") else diff.getdata())
             row["mean_diff"] = round(sum(sum(p) for p in px) / (len(px) * 3), 2)
             row["pct_differing"] = round(100.0 * sum(1 for p in px if max(p) > 48) / len(px), 2)
+            # Content (sprites, objects, effects) on one side and not the other, ignoring colour: edges with nothing
+            # near them in the other image, as 8x8 cells; a room ranks by its largest connected block of them.
+            de, te = edges(d), edges(t)
+            lost = missing_cells(de, te.filter(ImageFilter.MaxFilter(NEAR)))
+            extra = missing_cells(te, de.filter(ImageFilter.MaxFilter(NEAR)))
+            row["missing_on_3ds"] = largest_cluster(lost)
+            row["extra_on_3ds"] = largest_cluster(extra)
+            row["missing_cells"] = len(lost)
+            mark = t.copy()
+            mp = mark.load()
+            for cells, colour in ((lost, (255, 0, 255)), (extra, (0, 255, 255))):
+                for cx, cy in cells:
+                    for x in range(cx * CELL, min(cx * CELL + CELL, 320)):
+                        for y in (cy * CELL, min(cy * CELL + CELL, 240) - 1):
+                            mp[x, y] = colour
+                    for y in range(cy * CELL, min(cy * CELL + CELL, 240)):
+                        for x in (cx * CELL, min(cx * CELL + CELL, 320) - 1):
+                            mp[x, y] = colour
             sbs = Image.new("RGB", (960, 240))
             sbs.paste(d, (0, 0))
             sbs.paste(t, (320, 0))
-            sbs.paste(diff.point(lambda v: min(255, v * 3)), (640, 0))
+            sbs.paste(mark, (640, 0))
             row["image"] = f"sbs/{frame}_{room}.png"
             sbs.save(os.path.join(args.out, row["image"]))
         rows.append(row)
-    rows.sort(key=lambda r: -1 if r["mean_diff"] is None else r["mean_diff"], reverse=True)
+    rows.sort(key=lambda r: (-1, 0) if r["missing_on_3ds"] is None else (max(r["missing_on_3ds"], r["extra_on_3ds"]), r["missing_cells"]),
+              reverse=True)
 
     with open(os.path.join(args.out, "summary.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else ["room"])
@@ -206,22 +277,24 @@ def compare(args, shots):
         where = "" if not mismatch else f" <b>(desktop in {r['desktop_room']}, 3DS in {r['3ds_room']})</b>"
         if r["pct_differing"] is None:
             return f"<tr><td>{r['room']}{where}</td><td colspan=2>missing screenshot</td><td></td></tr>"
-        return (f"<tr><td>{r['room']}{where}<br>frame {r['frame']}</td><td>{r['pct_differing']}%</td><td>{r['mean_diff']}</td>"
+        return (f"<tr><td>{r['room']}{where}<br>frame {r['frame']}</td><td>{r['missing_on_3ds']}</td><td>{r['extra_on_3ds']}</td>"
                 f"<td><img src='{r['image']}' width=960 height=240 loading=lazy></td></tr>")
     html = ["<!doctype html><meta charset=utf-8><title>Room comparison</title>",
             "<style>body{font:14px sans-serif;background:#111;color:#ddd}td{padding:4px;vertical-align:top}"
             "img{image-rendering:pixelated}</style>",
-            "<h1>Desktop vs 3DS (Azahar), worst first</h1>",
-            "<p>Each image: desktop | 3DS (1x, cropped) | difference x3. % = pixels differing by more than 48 in a channel;"
-            " mean = mean absolute difference (0-255). Rooms marked bold weren't the same room on both sides.</p>",
-            "<table><tr><th>room</th><th>% differing</th><th>mean (sort)</th><th></th></tr>"]
+            "<h1>Desktop vs 3DS (Azahar): missing content, worst first</h1>",
+            "<p>Each image: desktop | 3DS (1x, cropped) | 3DS with the differences boxed: <b style='color:#f0f'>magenta</b> ="
+            " on the desktop, missing on the 3DS; <b style='color:#0ff'>cyan</b> = only on the 3DS. Colour is ignored (edges are"
+            " compared, within 3 px). missing / extra = the largest connected block of such 8x8 cells. Small scattered boxes are"
+            " usually animation; rooms in bold weren't the same room on both sides (Samus took a door).</p>",
+            "<table><tr><th>room</th><th>missing on 3DS</th><th>extra on 3DS</th><th></th></tr>"]
     html += [cell(r) for r in rows]
     html.append("</table>")
     with open(os.path.join(args.out, "report.html"), "w") as f:
         f.write("\n".join(html))
     log(f"{len(rows)} rooms; report: {os.path.join(args.out, 'report.html')}")
-    for r in rows[:15]:
-        log(f"  {r['room']:<16} {r['pct_differing']}% differing, mean {r['mean_diff']}"
+    for r in rows[:20]:
+        log(f"  {r['room']:<16} missing {r['missing_on_3ds']}, extra {r['extra_on_3ds']} (cells {r['missing_cells']})"
             f"{'' if r['desktop_room'] == r['3ds_room'] == r['room'] else '  (rooms: desktop %s, 3ds %s)' % (r['desktop_room'], r['3ds_room'])}")
 
 

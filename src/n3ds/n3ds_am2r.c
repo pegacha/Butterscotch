@@ -63,6 +63,7 @@ typedef struct {
     int32_t objMetroids[4];
     int32_t sprA, sprB, sprX, sprY;
     int32_t sfxPlay, sndMenuMove, sndMenuSel;
+    int32_t roomController, roomTitle;
     char* keyboardLabel; // what get_text gave for the Keyboard settings row
     int32_t lastControlPage;
     bool cheats[CHEAT_COUNT];
@@ -90,6 +91,7 @@ static RValue hookGetXJoyBtnSprite(VMContext* ctx, RValue* args, int32_t argCoun
 static RValue hookDamageSamus(VMContext* ctx, RValue* args, int32_t argCount);
 static RValue hookDamageSamusKnockdown(VMContext* ctx, RValue* args, int32_t argCount);
 static RValue hookDamageSamusPush(VMContext* ctx, RValue* args, int32_t argCount);
+static RValue hookRoomChange(VMContext* ctx, RValue* args, int32_t argCount);
 
 static N3DSAm2rHook gHooks[] = {
     { "get_text", hookGetText, -1 },
@@ -98,6 +100,7 @@ static N3DSAm2rHook gHooks[] = {
     { "damage_samus", hookDamageSamus, -1 },
     { "damage_samus_knockdown", hookDamageSamusKnockdown, -1 },
     { "damage_samus_push", hookDamageSamusPush, -1 },
+    { "room_change", hookRoomChange, -1 },
 };
 
 static int32_t N3DSAm2r_hookScript(BuiltinFunc hook) {
@@ -194,6 +197,18 @@ static RValue hookGetXJoyBtnSprite(MAYBE_UNUSED VMContext* ctx, RValue* args, in
     if (swapped == sprite || swapped < 0) return result;
     RValue_free(&result);
     return RValue_makeReal((GMLReal) swapped);
+}
+
+// ===[ Boot ]===
+
+// room_change(room, transition): at boot the game shows rm_controller (a "use a gamepad" notice) before the title;
+// on the 3DS that's skipped, straight to the title screen (the notice's room only waits and goes there).
+static RValue hookRoomChange(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount > 0 && gAm2r.roomController >= 0 && gAm2r.roomTitle >= 0 && RValue_toInt32(args[0]) == gAm2r.roomController) {
+        RValue_free(&args[0]);
+        args[0] = RValue_makeReal((GMLReal) gAm2r.roomTitle);
+    }
+    return N3DSAm2r_callOriginal(hookRoomChange, args, argCount);
 }
 
 // ===[ Unlimited health ]===
@@ -297,6 +312,8 @@ void N3DSAm2r_init(Runner* runner) {
     gAm2r.sprX = N3DSGml_spriteIndex("sXJoyBtnX");
     gAm2r.sprY = N3DSGml_spriteIndex("sXJoyBtnY");
     gAm2r.sfxPlay = N3DSGml_scriptIndex("sfx_play");
+    gAm2r.roomController = N3DSGml_roomIndex("rm_controller");
+    gAm2r.roomTitle = N3DSGml_roomIndex("titleroom");
     gAm2r.sndMenuMove = N3DSGml_soundIndex("sndMenuMove");
     gAm2r.sndMenuSel = N3DSGml_soundIndex("sndMenuSel");
     gAm2r.active = gAm2r.objOptionsMain >= 0 && gAm2r.objControl >= 0;

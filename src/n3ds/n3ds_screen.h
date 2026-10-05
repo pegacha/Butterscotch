@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdbool.h>
+
 // The top screen's mode (N3DS_SCREEN_MODE in cmake/n3ds.cmake is the default; a game front end can change it).
 typedef enum {
     N3DS_SCREEN_WIDE,      // upstream's widescreen hack: views grow to the 5:3 screen, 1:1 pixels
@@ -12,3 +14,7 @@ typedef enum {
 
 N3DSScreenMode N3DS_getScreenMode(void);
 void N3DS_setScreenMode(N3DSScreenMode mode);
+
+// Frameskip: two game steps per drawn frame (30 fps for a 60-step room), so the game keeps its speed.
+bool N3DS_getFrameskip(void);
+void N3DS_setFrameskip(bool on);

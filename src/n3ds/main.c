@@ -437,6 +437,7 @@ static void N3DS_noopSetWindowSize(MAYBE_UNUSED int32_t width, MAYBE_UNUSED int3
 #define N3DS_DEFAULT_SCREEN_MODE N3DS_SCREEN_WIDE
 #endif
 static N3DSScreenMode gScreenMode = N3DS_DEFAULT_SCREEN_MODE;
+static bool gFrameskip = false;
 static int32_t gWindowW = N3DS_TOP_SCREEN_W;
 static int32_t gWindowH = N3DS_TOP_SCREEN_H;
 
@@ -448,6 +449,16 @@ static const char* N3DS_screenModeName(N3DSScreenMode mode) {
         case N3DS_SCREEN_2X: return "2x";
         default: return "pillarbox (1:1)";
     }
+}
+
+bool N3DS_getFrameskip(void) {
+    return gFrameskip;
+}
+
+void N3DS_setFrameskip(bool on) {
+    if (on == gFrameskip) return;
+    gFrameskip = on;
+    logInfo("Frameskip: %s\n", on ? "on (30 fps, 2 steps a frame)" : "off");
 }
 
 N3DSScreenMode N3DS_getScreenMode(void) {
@@ -699,9 +710,13 @@ int main(int argc, char** argv) {
         // the two drifted out of phase.
         double gameSpeed = Runner_getEffectiveGameSpeed(runner);
         if (gameSpeed <= 0.0 || gameSpeed > 60.0) gameSpeed = 60.0;
-        if (gameSpeed != pacedSpeed) {
-            C3D_FrameRate((float) gameSpeed);
-            pacedSpeed = gameSpeed;
+        // Frameskip: two game steps per drawn frame, shown at half the room speed (30 fps for 60): the game keeps its
+        // speed and drawing costs half as much.
+        int32_t stepsPerFrame = gFrameskip ? 2 : 1;
+        double frameRate = gameSpeed / (double) stepsPerFrame;
+        if (frameRate != pacedSpeed) {
+            C3D_FrameRate((float) frameRate);
+            pacedSpeed = frameRate;
         }
 
         u64 frameStartTick = svcGetSystemTick();
@@ -710,9 +725,10 @@ int main(int argc, char** argv) {
         uint64_t frameStartNow = nowNanos();
         if (gN3DSResumed) {
             gN3DSResumed = false;
-            lastFrameStartTime = frameStartNow - (uint64_t) (1.0e9 / gameSpeed);
+            lastFrameStartTime = frameStartNow - (uint64_t) (1.0e9 / frameRate);
         }
-        runner->deltaTime = (int64_t) (frameStartNow - lastFrameStartTime) / 1000.0;
+        // delta_time is per step.
+        runner->deltaTime = (int64_t) (frameStartNow - lastFrameStartTime) / 1000.0 / (double) stepsPerFrame;
         lastFrameStartTime = frameStartNow;
 
         RunnerKeyboard_beginFrame(runner->keyboard);
@@ -746,6 +762,19 @@ int main(int argc, char** argv) {
         if (0.0f > dt) dt = 0.0f;
         if (dt > 0.1f) dt = 0.1f;
         runner->audioSystem->vtable->update(runner->audioSystem, dt);
+        // The frameskip's other step(s), with their own input; not once a room change is pending (it happens after
+        // the frame's drawing, below).
+        for (int32_t extra = 1; extra < stepsPerFrame && runner->pendingRoom < 0 && !runner->shouldExit; extra++) {
+            RunnerKeyboard_beginFrame(runner->keyboard);
+            RunnerGamepad_beginFrame(runner->gamepads);
+            RunnerMouse_beginFrame(runner->mouse);
+            N3DSInput_update(runner);
+            InputRecording_processFrame(inputPlayback, runner->keyboard, inputFrame++);
+            if (N3DSInput_takeMonitorToggle()) debugMonitorVisible = !debugMonitorVisible;
+            Runner_step(runner);
+            N3DSAm2r_update();
+            runner->audioSystem->vtable->update(runner->audioSystem, dt);
+        }
         double stepMs = (double) (svcGetSystemTick() - stepStartTick) * 1000.0 / (double) SYSCLOCK_ARM11;
 
         bool roomChanged = runner->currentRoom != lastRoom;

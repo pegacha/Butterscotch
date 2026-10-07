@@ -3,8 +3,8 @@
 From upstream [ButterscotchRunner/Butterscotch](https://github.com/ButterscotchRunner/Butterscotch) `main` at `d8575ec`
 (this repository's `main` was the `port/n3ds` branch). 3DS backend from
 [Project-Sunshine-Native/cinnamon](https://github.com/Project-Sunshine-Native/cinnamon) `UNDERTALE-3DS` (`f139a60`).
-First target: AM2R 1.1 (WAD 14) and AM2R Community Updates 1.5.x (GameMaker: Studio 1.4.1763, WAD 15; the AM2R build
-enables both), New 3DS (804 MHz, L2 cache, 124 MB mode, core 2).
+Target: AM2R Community Updates 1.5.5 (GameMaker: Studio 1.4.1763, WAD 15/16; the main target since 2026-10-07) and
+AM2R 1.1 (WAD 14); the AM2R build enables both. New 3DS (804 MHz, L2 cache, 124 MB mode, core 2).
 
 ## Build and run
 
@@ -30,9 +30,21 @@ Vulkan) and collects `log.txt`, screenshots and Azahar's log (`-Harness`, `-Save
 `-WaitSeconds` hard limit, `-CpuClock`: **100 approximates hardware**; 300 hides CPU-bound problems).
 `harness.txt` = scripted presses / self-screenshots / exit, with `after_room` anchors (`hwcheck.txt`: title, load,
 pause, walk; `pause.txt`; `explore.txt`); `goto <frame> <room>` and `place <frame> <x> <y>` (moves Samus) reach a
-room to test without playing to it. `inputs.json` = keyboard playback in the desktop `--playback-inputs`
+room to test without playing to it; `seed <n>` fixes the random seed (`randomize()` then does nothing), so two runs
+draw the same frames. `profrooms_cu.txt` (1.5.5: new game in slot A, intro, then the big rooms with a screenshot each;
+`profrooms_cu_seeded.txt` with a seed) and `profrooms.txt` / `bigrooms.txt` (1.1, from slot A's save) are the
+performance runs. For 1.5.5, delete `save*` in Azahar's `sdmc/3ds/am2r/` before a run (`-ClearSaves` also deletes
+`config.ini`, which changes 1.5's first boot). `inputs.json` = keyboard playback in the desktop `--playback-inputs`
 format with a fixed seed; `tools/n3ds/run_tas.ps1` (and `run_tas.bat`, drag a `.ltm` onto it) replays a libTAS
-movie via `ltm_to_inputs.py`. `-DENABLE_VM_GML_PROFILER=ON` logs a GML profile every 120 frames.
+movie via `ltm_to_inputs.py`.
+
+Profiling: `tools/n3ds/build.sh ../build-n3ds-prof -DENABLE_VM_GML_PROFILER=ON -DN3DS_FRAME_PROFILER=ON` logs, on
+every room change, a `Room perf:` line and a `Profile:` breakdown of the room's frames: exclusive CPU time per zone
+(GML step, frame start, view drawing, GUI, overlays, and inside them sprites, text, surfaces, GPU flushes, texture
+loads; tiles are counted, not timed: reading the clock is a syscall and Azahar charges 150 cycles for each), then the
+40 heaviest GML scripts/events with their builtins. Without the frame profiler, `ENABLE_VM_GML_PROFILER` logs a GML
+profile every 120 frames. `-DN3DS_NO_TILE_CULL=ON` draws every tile (to check culling against). The texture cache
+logs page imports and evictions in the profiler build.
 `tools/n3ds/compare_rooms.py` screenshots every room (`--match`/`--rooms`) on the desktop runner (under Xvfb, with
 `--goto-room`) and in Azahar (Linux AppImage, screen mode 1x), pairs the shots by the room each was really taken in,
 and writes `report.html` ranked by difference (desktop | 3DS | difference). `harness_to_desktop.py` turns `goto`
@@ -52,11 +64,15 @@ into the desktop's `--goto-room <frame>:<room>`.
   and a target must fit in one; a surface that doesn't fit at RGBA8 drops to RGBA5551, then to a smaller stored
   area (top-left part). Over 1024 only the top-left 1024 is stored (PICA limit). AM2R's 2048x1024 pause map ends
   up as 1024x512 RGBA5551, which holds the whole map (it uses about 600x464).
-- Screen: AM2R lays out its own 320x240 (application surface and HUD at its own offsets), so the default mode
-  (`N3DS_SCREEN_MODE`) stretches it to 400x240 (also: widescreen hack, 1:1 pillarbox). In AM2R the mode is picked in
-  Options -> Display -> Screen: Stretch (default), 1x (320x240 centred), 2x (doubled and centred: the middle
-  200x120, the edges and HUD off screen) or Wide (the widescreen hack); 1x/2x use `N3DSRenderer_setFixedScale`. The
-  touch screen belongs to the pause screen.
+- Screen: AM2R lays out its own picture in the window it is told about (application surface and HUD at its own
+  offsets), so the window the game sees is the game's size and the renderer scales that to the screen. In AM2R the
+  mode is picked in Options -> Display -> Screen: Stretch (default), 1x (centred 1:1), 2x (doubled and centred) or
+  Wide (upstream's widescreen hack); 1x/2x use `N3DSRenderer_setFixedScale`. AM2R 1.5 has its own widescreen
+  (`oControl.widescreen`, on by default: a 426x240 view into `widescreen_surface`, centred by the game in the window):
+  while it is on, the window is 426 wide (`N3DSAm2r_gameWidth`), the GUI layer is the window's size (1.5 draws its
+  HUD in window coordinates) and Wide adds no hack on top. 1.5 makes `widescreen_surface` once, on its first frame,
+  320 wide (before the widescreen width is set); on a PC it is lost and remade at startup, here the front end frees a
+  wrong-sized one so the game remakes it. The touch screen belongs to the pause screen.
 - Pause screen (`n3ds_pause.c`): while the game is in `rm_subscreen` (or the transition into it), the game's
   screen (`RENDER_TARGET_HOST_FRAMEBUFFER`) is the bottom screen, 1:1, and the top screen shows the game as it was
   when paused. That frame is captured when Start goes into the input delay line (AM2R blanks the screen on the
@@ -79,7 +95,7 @@ into the desktop's `--goto-room <frame>:<room>`.
   `get_text`, `get_xjoybtnname` and `get_xjoybtnsprite` go through C hooks that call the game's script and adjust
   the result (Nintendo button names, A/B and X/Y icons swapped by position, "XBox 360 Joypad" -> "Nintendo 3DS",
   Display tip). The Control page's Keyboard row is hidden (`canedit` 0, rows below moved up); the Display page is
-  replaced by a 3DS one (Screen, Cheats, Exit) and a Cheats page under it, built from the game's own row objects
+  replaced by a 3DS one (Screen, Frameskip, Fast scripts, Cheats, Exit) and a Cheats page under it, built from the game's own row objects
   (`oMenuLabel`, `oOptionLR`, `oPauseOption`) and driven from C (`oControl.k*`); cheats and the screen mode live in
   `sdmc:/3ds/am2r/cheats.ini`. The water/lava
   ripple filter `oWaterFXV2` (a copy of the screen redrawn in 1-pixel strips every frame) is removed.
@@ -111,11 +127,35 @@ into the desktop's `--goto-room <frame>:<room>`.
   into `gfx/atlas.bin`; sprite sheets into `gfx/direct_assets.bin`; `room_manifest.bin` lists each room's pages.
   On a room change the room's pages are queued for a background loader thread (own handle on `atlas.bin`, core 2,
   priority above the main thread: below it, it starved); a page needed before its turn is read or waited for.
-- `drawTile` culls against the visible room rectangle before any lookup (the runner hands over every tile in
-  the room; ~2x on AM2R's draw time).
+- Tiles: the runner keeps a GMS1 room's tiles per depth in a grid of 128 px cells (`TileRun`) and asks the
+  renderer for the visible room rectangle (`getVisibleRoomRect`), so a frame visits the tiles near the view (54 of
+  3744 in `rm_a3h04`) instead of handing over every one; `drawTile` still culls each.
+- Texture cache: atlas pages live in linear memory (not VRAM). Past the 5 MB budget, a page drawn within the last
+  second is kept while linear memory has 3 MB left, instead of evicting pages still in use (a room whose pages didn't
+  fit re-imported ten of them every few frames: a 14 ms hitch).
+- `surface_set_target` sets the viewport to the whole surface (it kept the game's 320-wide view port, squeezing any
+  wider surface, such as 1.5's 426-wide picture, into 320 columns).
 - Dropped Undertale-only code: borders, battle top-screen layout, sprite-name hacks, GMS2 tile-layer cache,
   `sdmc:/3ds/UNDERTALE` paths.
 - `n3ds-preprocess`: builds against upstream (`src/image/image_decoder.c`, bzip2, log shim, const-safe `repeat`).
+
+## Built-in scripts ("Fast scripts")
+
+`src/n3ds/n3ds_am2r_native.c` (+ `n3ds_am2r_native_hud.inc`): C versions of AM2R 1.5.5's busiest scripts and events,
+each following the game's bytecode instruction for instruction (same values read, same variables written through the
+VM's own setters, same builtins called in the same order, GML's epsilon comparisons, `random()` sequence kept):
+`string_split`, `approximatelyZero`, `calculateCollisionBounds`, `isCollisionLeft/Right/Top/Bottom/Rectangle`,
+`draw_mapblock`, `draw_gui_map`, `draw_gui` (HUD) and the events `oEnemy` Draw, `oA6Dust` Draw and `oLightEngine`
+User Event 1 (the light map; a room with `oCoreX`, whose block nests further with-blocks, runs the game's code).
+
+- Scripts replace the FUNC call cache entry (`funcCallCache[i].builtin`), events go through
+  `Runner.nativeEventCode` (checked in `executeCode`); turning the option off restores both, so off costs nothing.
+- Each is pinned to the FNV-1a hash of its bytecode (`n3ds_am2r_native_hashes.h`): other versions (1.1, mods) keep the
+  game's code; a missing hash is logged at boot with the actual one. A native that meets something unexpected (a
+  variable missing or of another type) calls the game's code instead, before drawing or writing anything.
+- Variables are resolved from the VARI entry of their kind (instance or global): the VM's name map also holds locals,
+  and 1.5.5 has a local `scale` that shadowed `oA6Dust.scale`.
+- Checked with `profrooms_cu_seeded.txt`: top-screen screenshots pixel-identical with the option on and off.
 
 ## Diagnostics
 
@@ -125,7 +165,28 @@ Bottom screen (top screen while paused; toggle Start+Select): FPS, average frame
 thread only); VRAM, heap used/total, linear free, UNIMPL count, room. `log.txt`: a `Perf:` line every 5 s, every
 room's first frame and any frame over 100 ms with the same breakdown.
 
-## Upstream engine fixes
+## Upstream engine changes
+
+Performance (all general, kept behaviour-identical):
+
+- `instance_activate_region`: inactive instances' bounding boxes in a packed array (`Runner.inactiveBBoxes`, kept by
+  `Runner_setActiveState`, rebuilt after room changes) instead of computing every inactive instance's box per call.
+  AM2R deactivates most of the room every step and activates regions around the view and every enemy: 8 ms a frame
+  in `rm_a3h04`.
+- `collision_line`, `collision_rectangle`, `collision_point`, `instance_position`: candidates from the spatial grid
+  when the cells in range hold fewer instances than the target object has (`pushGridCandidates`), as the `_list`
+  variants and `instance_place` already did.
+- `SpatialGrid_removeInstance`: the whole-grid scan for stale entries only runs when an instance's own cells didn't
+  hold it; a grid generation number tells an instance whether its cells belong to the current room's grid. Every
+  moving instance re-filed in a crowded room scanned the whole grid.
+- Draw list: tiles/layers are kept sorted on their own (`cachedStaticDrawables`); creating or destroying instances
+  sorts only the instances and merges (lava bubbles made every frame re-sorted ~2500 drawables).
+- Tile layer lookups are cached across a run of same-depth tiles; `tile_layer_depth` / `tile_set_scale` rebuild the
+  static part.
+- Script locals and arguments, and event locals, come from per-size free lists (`vmAllocSlots`) instead of a calloc and
+  free per call; nested events keep the caller's stack values on the C stack.
+
+Fixes:
 
 - `runner.c` `persistRoomState`: deactivated instances are kept with a persistent room (GameMaker keeps them,
   still deactivated); they were freed. AM2R deactivates every solid away from the view each step and keeps the room
@@ -142,8 +203,24 @@ None so far: AM2R runs on upstream's engine unmodified (no AUDO header parsing, 
 None hit in title, menus, file select, intro, the pause screen or the first area (`rm_a0h01`..`rm_a0h06`).
 Stubbed and logged if hit: shaders (AM2R has 2, not used so far), primitives/vertex buffers, gradient sprite
 parts/surfaces, `surface_get_pixels`, `sprite_create_from_surface`, fog, colour write masks, rotated views.
+AM2R 1.5.5 hits two: `surface_get_pixels` (9 calls at boot) and colour write masks (`draw_gui_map` draws Samus's cell
+without writing alpha).
 
 ## Performance (Azahar, New 3DS, CPU clock 100%)
+
+Big rooms, AM2R 1.5.5, release build (2026-10-07; each run includes one screenshot stall per room):
+
+| room | before | now | step + draw now |
+|---|---|---|---|
+| `rm_a3h04` | 28 fps | 51 fps | 14.3 ms |
+| `rm_a6b14` | 29 fps | 49 fps | 15.4 ms |
+| `rm_a5h04` | 26 fps | 51 fps | 12.6 ms |
+| `rm_a2h02` | 47 fps | 52 fps | 8.8 ms |
+
+Azahar measures about 57.9 fps even on the title screen with 3.5 ms of work a frame, probably its own timing (it
+advances the clock 150 cycles on every `svcGetSystemTick`); hardware numbers settle it.
+
+Earlier work:
 
 | | before | now |
 |---|---|---|
@@ -158,6 +235,8 @@ screens and room changes, pause screen ~7.5 fps.
 
 ## Known issues
 
+- A music change stalls the game for about 150 ms (the audio system opens the stream on the main thread).
+- Area 6 tiles cost about 3.6 us each to draw (729 visible in `rm_a6b14`, 2.6 ms).
 - A room change on hardware once left the game in the transition room (Samus gone, old view shown, game still
   running); not reproduced in Azahar.
 - Start/Select reach the game 3 frames (50 ms) late (Start+Select chord detection).

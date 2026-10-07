@@ -1,6 +1,6 @@
 # AM2R 3DS
 
-AM2R (Another Metroid 2 Remake) 1.1 on the New Nintendo 3DS.
+AM2R (Another Metroid 2 Remake) on the New Nintendo 3DS: the 1.5.5 Community Updates (recommended) or the original 1.1.
 
 This is a game-specific fork of [Butterscotch](https://github.com/ButterscotchRunner/Butterscotch), an open source
 re-implementation of the GameMaker: Studio runner in C. Butterscotch runs the game's own bytecode (`data.win`), so the
@@ -9,13 +9,23 @@ re-implementation of the GameMaker: Studio runner in C. Butterscotch runs the ga
 [Cinnamon](https://github.com/Project-Sunshine-Native/cinnamon)'s Undertale 3DS port.
 
 > [!IMPORTANT]
-> You need your own copy of AM2R 1.1. This repository does not include any game files.
+> You need your own copy of AM2R. This repository does not include any game files.
+
+## Which version
+
+- **AM2R 1.5.5 (Community Updates)**, made from your AM2R 1.1 with the
+  [AM2R Launcher](https://github.com/AM2R-Community-Developers/AM2RLauncher): the version this port is tuned for. Its
+  own 16:9 widescreen picture (426x240) suits the 400x240 top screen, and the "Fast scripts" option (built-in versions of
+  its busiest scripts) only applies to it.
+- **AM2R 1.1**: still runs (4:3, stretched or 1:1).
+
+Saves don't carry over between the two: 1.5 saves as `save1`..`save3`, 1.1 as `sav1`..`sav3`.
 
 ## Install
 
 1. **SD card files.** Download `am2r-sd.bat` (Windows) or `am2r-sd.sh` (Linux) from the
-   [latest release](../../releases/latest) and run it. Pick your AM2R 1.1 `data.win` (or the Community Updates one
-   made with the [AM2R Launcher](https://github.com/AM2R-Community-Developers/AM2RLauncher)) and a folder; it writes
+   [latest release](../../releases/latest) and run it. Pick the game's `data.win` (for 1.5.5: the one in the
+   launcher's `Profiles/Community Updates (Latest)` folder, with its music files next to it) and a folder; it writes
    `<folder>/3ds/am2r/`, which you copy to the root of the SD card, and downloads `am2r.cia` next to it.
    - On Windows it runs in WSL, and offers to install WSL (administrator rights and a restart) if it isn't there.
    - The first run downloads the tools it needs (the preprocessor and devkitPro's `tex3ds`) into its own folder.
@@ -29,8 +39,36 @@ re-implementation of the GameMaker: Studio runner in C. Butterscotch runs the ga
    Every passing build is published as a release; builds from branches other than `main` are marked pre-release
    (`claude/*` work-in-progress branches only get a build artifact).
 
-Saves and `log.txt` go in `sdmc:/3ds/am2r/`. The 3DS button layout is in [res/n3ds/am2r/README.md](res/n3ds/am2r/README.md);
-the game's own Joypad menu can rebind it. The pause screen opens on the bottom screen and is driven by touch.
+Saves, `cheats.ini` (the 3DS options) and `log.txt` go in `sdmc:/3ds/am2r/`.
+
+## Playing
+
+- **Buttons:** B jump, Y fire, A morph, L/ZL aim, R missiles, ZR aim lock, Select weapon, Start pause; in menus A is OK
+  and B is back. The full layout is in [res/n3ds/am2r/README.md](res/n3ds/am2r/README.md); the game's own Joypad menu
+  can rebind it.
+- **Bottom screen:** the area map around Samus while you play; a tap opens the pause screen there, which is driven by
+  touch (pages, map panning and markers, inventory, logs, options).
+- **Options → Display** is a 3DS page:
+  - *Screen:* Stretch (default), 1x, 2x or Wide.
+  - *Frameskip:* a steady 30 fps at full game speed.
+  - *Fast scripts:* on by default. Runs the game's busiest scripts (HUD, minimap, collision checks, the Area 6 light
+    map, ...) as built-in code: same result, much faster. "N/A" for game versions it wasn't written for.
+  - *Cheats:* unlimited health and ammo, stronger weapons.
+- **Start+Select** shows a performance monitor.
+
+## Performance
+
+Measured in the Azahar emulator at CPU clock 100 (close to a real New 3DS) with the 1.5.5 game files, release build.
+Most rooms run at the full 60 fps; the busiest ones need 12–15 ms of the 16.7 ms frame budget.
+
+| room | before (2026-10-06) | now |
+|---|---|---|
+| `rm_a3h04` (730 objects) | 28 fps | 51 fps |
+| `rm_a6b14` (Area 6, light map) | 29 fps | 49 fps |
+| `rm_a5h04` (lava) | 26 fps | 51 fps |
+| `rm_a2h02` | 47 fps | 52 fps |
+
+(Each figure includes a screenshot stall in the test; real hardware numbers welcome, via `log.txt`.)
 
 ## Building
 
@@ -41,12 +79,13 @@ tools/n3ds/build.sh ../build-n3ds    # -> am2r.cia + am2r.3dsx (needs devkitARM,
 [.github/workflows/build-n3ds.yml](.github/workflows/build-n3ds.yml) is the reference build: the `devkitpro/devkitarm`
 container, with makerom built from [3DSGuy/Project_CTR](https://github.com/3DSGuy/Project_CTR).
 
-[PORTING_NOTES.md](PORTING_NOTES.md) covers how the port works: the SD layout, the emulator test loop (Azahar), the
-renderer, audio and file system, the pause screen, diagnostics, performance numbers and known issues.
+[PORTING_NOTES.md](PORTING_NOTES.md) covers how the port works: the SD layout, the emulator test loop (Azahar) and its
+harness, the renderer, audio and file system, the pause screen, the built-in scripts, profiling, performance work and
+known issues.
 
 ## Credits
 
-* AM2R by DoctorM64 and team.
+* AM2R by DoctorM64 and team; the Community Updates by the AM2R Community Developers.
 * [Butterscotch](https://github.com/ButterscotchRunner/Butterscotch) by MrPowerGamerBR and contributors.
 * [Cinnamon](https://github.com/Project-Sunshine-Native/cinnamon) (3DS, Wii and Wii U ports of Butterscotch) by
   @casrielasriel and @grayforz24682.
@@ -57,5 +96,6 @@ GNU Affero General Public License v3.0, as Butterscotch: see [LICENSE](LICENSE).
 
 ## Disclaimer
 
-This project has no association, endorsement, or any connection whatsoever with Nintendo, the AM2R team, YoYo Games or
-any of the software it runs, and does not provide any of it. You need to provide your own game files.
+This project has no association, endorsement, or any connection whatsoever with Nintendo, the AM2R team, the AM2R
+Community Developers, YoYo Games or any of the software it runs, and does not provide any of it. You need to provide
+your own game files.

@@ -7,9 +7,12 @@
 #include "../log.h"
 #include "../runner.h"
 #include "../utils.h"
+#include "stb_ds.h"
 
 #include <3ds.h>
 
+#include <ctype.h>
+#include <dirent.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,7 +39,10 @@
 #define N3DS_STREAM_CHUNK_SAMPLES (14u * 256u)
 #define N3DS_STREAM_ADPCM_CACHE_FRAMES 256u
 #define N3DS_STREAM_WORKER_STACK_SIZE (32u * 1024u)
-#define N3DS_STREAM_WORKER_PRIORITY 0x31
+// Above the main thread (0x30) and the background page loader (0x2F): it only reads a few KB at a time, and below the
+// page loader (same core, same SD card) its reads waited behind 512 KB page reads, so a music change could block the
+// main thread for up to 0.7 s waiting for the previous track's fill to finish.
+#define N3DS_STREAM_WORKER_PRIORITY 0x2E
 #define N3DS_STREAM_WORKER_CORE_ID 1
 #define N3DS_STREAM_WORKER_CPU_LIMIT 20u
 #define N3DS_AUDIO_FILE_BUFFER_SIZE (64u * 1024u)
@@ -172,6 +178,13 @@ typedef struct {
     int16_t pendingPcm[14 * 2];
     uint32_t streamGeneration;
     N3DSAsyncStreamFill asyncFill;
+    // Music started in the background: the stream worker opens the file and reads its header (startDone), then
+    // N3DSAudio_update sets up the channels and buffers. Until then the instance has no channel (channelId -1).
+    bool startPending;
+    bool startInProgress;
+    bool startDone;
+    bool startOk;
+    char* startPath;
     u64 playbackStartTick;
     u64 playbackReleaseTick;
     // audio_sound_gain(..., time): gain moves from fadeFrom to fadeTo over fadeTicks (0 = no fade running).
@@ -515,8 +528,41 @@ cleanup:
     return loaded;
 }
 
+// The SD audio folder's file names (lower case), listed once at init: resolving a track's file (first play of each)
+// stat()ed the card on the main thread, 10-30 ms a time. Read-only after init.
+static struct { char* key; bool value; }* gN3DSAudioDirFiles = NULL;
+static bool gN3DSAudioDirListed = false;
+
+static void N3DSAudio_lowerInto(char* out, size_t outSize, const char* in) {
+    size_t i = 0;
+    for (; in[i] != '\0' && i + 1 < outSize; i++) out[i] = (char) tolower((unsigned char) in[i]);
+    out[i] = '\0';
+}
+
+static void N3DSAudio_listAudioDir(void) {
+    DIR* dir = opendir(N3DS_SDMC_AUDIO_BASE);
+    if (dir == NULL) return;
+    sh_new_strdup(gN3DSAudioDirFiles);
+    struct dirent* entry;
+    char lower[256];
+    while ((entry = readdir(dir)) != NULL) {
+        N3DSAudio_lowerInto(lower, sizeof(lower), entry->d_name);
+        shput(gN3DSAudioDirFiles, lower, true);
+    }
+    closedir(dir);
+    gN3DSAudioDirListed = true;
+}
+
 static bool N3DSAudio_fileExists(N3DSAudioSystem* audio, const char* path) {
     if (path == NULL) return false;
+
+    static const char kAudioDir[] = N3DS_SDMC_AUDIO_BASE "/";
+    if (gN3DSAudioDirListed && strncmp(path, kAudioDir, sizeof(kAudioDir) - 1) == 0 &&
+        strchr(path + sizeof(kAudioDir) - 1, '/') == NULL) {
+        char lower[256];
+        N3DSAudio_lowerInto(lower, sizeof(lower), path + sizeof(kAudioDir) - 1);
+        return shgeti(gN3DSAudioDirFiles, lower) >= 0;
+    }
 
     if (audio != NULL) LightLock_Lock(&audio->missingPathLock);
     repeat(gN3DSMissingAudioPathCount, i) {
@@ -828,14 +874,8 @@ static bool N3DSAudio_parseBcwavBlob(const uint8_t* data, uint32_t size, N3DSBcw
     return N3DSAudio_parseBcwavInfo(data + infoOffset, infoSize, dataOffset, size, out);
 }
 
-static bool N3DSAudio_parseBcwavFile(const char* path, N3DSBcwav* out) {
-    if (path == NULL || out == NULL) return false;
-
+static bool N3DSAudio_parseBcwavFromFile(FILE* file, N3DSBcwav* out) {
     bool success = false;
-    FILE* file = fopen(path, "rb");
-    if (file == NULL) return false;
-    N3DSAudio_configureFileBuffer(file);
-
     uint32_t fileSize = 0;
     uint8_t header[0x28];
     uint8_t* infoData = NULL;
@@ -858,6 +898,15 @@ static bool N3DSAudio_parseBcwavFile(const char* path, N3DSBcwav* out) {
 
 cleanup:
     free(infoData);
+    return success;
+}
+
+static bool N3DSAudio_parseBcwavFile(const char* path, N3DSBcwav* out) {
+    if (path == NULL || out == NULL) return false;
+    FILE* file = fopen(path, "rb");
+    if (file == NULL) return false;
+    N3DSAudio_configureFileBuffer(file);
+    bool success = N3DSAudio_parseBcwavFromFile(file, out);
     fclose(file);
     return success;
 }
@@ -1228,6 +1277,7 @@ static void N3DSAudio_applyMix(N3DSAudioSystem* audio, N3DSSoundInstance* inst) 
     float mix[12];
     memset(mix, 0, sizeof(mix));
     inst->gain = N3DSAudio_sanitizeGain(inst->gain);
+    if (inst->channelId < 0) return; // music still starting: applied by N3DSAudio_rebuildInstanceChannels
     float masterGain = audio->masterGain * N3DSAudio_groupGain(audio, inst);
     if (inst->useNativeAdpcm && inst->secondaryChannelId >= 0) {
         mix[0] = inst->gain * masterGain;
@@ -1787,7 +1837,10 @@ static void N3DSAudio_releaseInstance(N3DSAudioSystem* audio, N3DSSoundInstance*
     }
     if (audio != NULL && inst->isStream) {
         N3DSAudio_cancelAsyncFillLocked(audio, inst);
+        // A background start in progress owns the instance until it is done (then streamFile is closed below).
+        while (inst->startInProgress) CondVar_Wait(&audio->workerCond, &audio->lock);
     }
+    free(inst->startPath);
 
     N3DSAudio_releaseChannel(audio, inst->channelId);
     N3DSAudio_releaseChannel(audio, inst->secondaryChannelId);
@@ -2665,6 +2718,43 @@ static void N3DSAudio_streamWorkerMain(void* arg) {
                 threadExit(0);
             }
 
+            // Music to start: open the file and read its header here, off the main thread.
+            int32_t startSlot = -1;
+            repeat(N3DS_MAX_SOUND_INSTANCES, i) {
+                N3DSSoundInstance* inst = &audio->instances[i];
+                if (!inst->active || !inst->startPending || inst->startInProgress || inst->startDone) continue;
+                inst->startInProgress = true;
+                startSlot = (int32_t) i;
+                break;
+            }
+            if (startSlot >= 0) {
+                N3DSSoundInstance* inst = &audio->instances[startSlot];
+                const char* path = inst->startPath;
+                bool loop = inst->loop;
+                LightLock_Unlock(&audio->lock);
+                N3DSBcwav bcwav;
+                memset(&bcwav, 0, sizeof(bcwav));
+                bool ok = false;
+                FILE* file = fopen(path, "rb");
+                if (file != NULL) {
+                    N3DSAudio_configureFileBuffer(file);
+                    ok = N3DSAudio_parseBcwavFromFile(file, &bcwav) && N3DSAudio_canUseNativeAdpcmPlayback(&bcwav, loop);
+                    if (!ok) {
+                        fclose(file);
+                        file = NULL;
+                    }
+                }
+                LightLock_Lock(&audio->lock);
+                inst->startInProgress = false;
+                inst->startDone = true;
+                inst->startOk = ok;
+                inst->streamFile = file;
+                if (ok) inst->bcwav = bcwav;
+                CondVar_Broadcast(&audio->workerCond);
+                LightLock_Unlock(&audio->lock);
+                continue;
+            }
+
             repeat(N3DS_MAX_SOUND_INSTANCES, i) {
                 N3DSSoundInstance* inst = &audio->instances[i];
                 if (!inst->active || !inst->isStream) continue;
@@ -2819,6 +2909,7 @@ static bool N3DSAudio_startFileStreamPlayback(
 }
 
 static void N3DSAudio_init(AudioSystem* base, DataWin* dataWin, FileSystem* fileSystem) {
+    N3DSAudio_listAudioDir();
     N3DSAudioSystem* audio = (N3DSAudioSystem*) base;
     if (audio == NULL || audio->initialized) return;
 
@@ -2826,7 +2917,9 @@ static void N3DSAudio_init(AudioSystem* base, DataWin* dataWin, FileSystem* file
     LightLock_Init(&audio->lock);
     LightLock_Init(&audio->missingPathLock);
     CondVar_Init(&audio->workerCond);
-    LightEvent_Init(&audio->workerEvent, RESET_STICKY);
+    // One-shot: a sticky event (never cleared) made every wait return at once, so the worker spun on its core
+    // (unnoticed below the main thread's priority; above the page loader it would starve it).
+    LightEvent_Init(&audio->workerEvent, RESET_ONESHOT);
     audio->fileSystem = fileSystem;
     audio->masterGain = 1.0f;
     repeat(32, g) audio->groupGains[g] = 1.0f;
@@ -2959,6 +3052,56 @@ static void N3DSAudio_destroy(AudioSystem* base) {
     gN3DSMissingAudioPathCount = 0;
 }
 
+// Sets up a background-started music instance once the worker has opened it: channels, buffers, format. The update
+// loop then requests its buffers from the worker like any stream's. False: it could not start (release it).
+static bool N3DSAudio_finishStreamStartLocked(N3DSAudioSystem* audio, N3DSSoundInstance* inst) {
+    inst->startPending = false;
+    char* path = inst->startPath;
+    inst->startPath = NULL;
+    if (!inst->startOk || inst->streamFile == NULL) {
+        logWarn("N3DS audio: music %s did not start\n", path != NULL ? path : "?");
+        free(path);
+        return false;
+    }
+    const N3DSBcwav* bcwav = &inst->bcwav;
+    inst->channelId = N3DSAudio_acquireChannel(audio);
+    if (inst->channelId < 0) {
+        free(path);
+        return false;
+    }
+    if (bcwav->channelCount == 2) {
+        inst->secondaryChannelId = N3DSAudio_acquireChannel(audio);
+        if (inst->secondaryChannelId < 0) {
+            free(path);
+            return false;
+        }
+    }
+    inst->useNativeAdpcm = true;
+    inst->sampleRate = bcwav->sampleRate;
+    inst->sampleCount = bcwav->sampleCount;
+    inst->channelCount = bcwav->channelCount;
+    inst->baseRate = (float) bcwav->sampleRate;
+    uint32_t maxFrames = (N3DS_STREAM_CHUNK_SAMPLES + 13u) / 14u;
+    uint32_t bytesPerBuffer = maxFrames * 8u;
+    repeat(inst->channelCount, channelIndex) {
+        repeat(N3DS_STREAM_BUFFER_COUNT, bufferIndex) {
+            inst->streamAdpcm[channelIndex][bufferIndex] = linearAlloc(bytesPerBuffer);
+            if (inst->streamAdpcm[channelIndex][bufferIndex] == NULL) {
+                free(path);
+                return false;
+            }
+        }
+    }
+    N3DSAudio_streamResetDecoder(inst);
+    N3DSAudio_resetInstanceWaveBufState(inst);
+    inst->streamFinished = false;
+    N3DSAudio_rebuildInstanceChannels(audio, inst);
+    logInfo("N3DS audio: music %s (%lu Hz, %lu ch, DSP-ADPCM)\n", path, (unsigned long) inst->sampleRate,
+        (unsigned long) inst->channelCount);
+    free(path);
+    return true;
+}
+
 static void N3DSAudio_update(AudioSystem* base, MAYBE_UNUSED float deltaTime) {
     N3DSAudioSystem* audio = (N3DSAudioSystem*) base;
     u64 nowTick = svcGetSystemTick();
@@ -2970,6 +3113,14 @@ static void N3DSAudio_update(AudioSystem* base, MAYBE_UNUSED float deltaTime) {
         N3DSSoundInstance* inst = &audio->instances[i];
         if (!inst->active) continue;
         if (!inst->paused) N3DSAudio_updateFadeLocked(audio, inst, nowTick);
+
+        if (inst->startPending) {
+            if (!inst->startDone) continue;
+            if (!N3DSAudio_finishStreamStartLocked(audio, inst)) {
+                N3DSAudio_releaseInstance(audio, inst);
+                continue;
+            }
+        }
 
         if (!inst->isStream) {
             bool finished = N3DSAudio_nonStreamPlaybackFinished(inst, nowTick);
@@ -3068,7 +3219,9 @@ static int32_t N3DSAudio_playSound(AudioSystem* base, int32_t soundIndex, MAYBE_
         if (!N3DSAudio_soundLooksLikeMusic(sound)) {
             hasPackedBlob = N3DSAudio_getPackedSoundBlob(audio, soundIndex, &packedBlob, &packedBlobSize);
         }
-        useMusicStreamPath = sound != NULL && loop && N3DSAudio_soundLooksLikeMusic(sound);
+        // Music that doesn't loop (the intro, jingles) streams too: read whole, the intro's took 180-400 ms in the
+        // frame it started.
+        useMusicStreamPath = sound != NULL && N3DSAudio_soundLooksLikeMusic(sound);
         if (useMusicStreamPath || (!hasPackedBlob && cachedSound == NULL)) {
             const char* resolvedPath = N3DSAudio_getResolvedCachedSoundPath(audio, soundIndex, sound);
             if (resolvedPath != NULL) path = safeStrdup(resolvedPath);
@@ -3124,6 +3277,18 @@ static int32_t N3DSAudio_playSound(AudioSystem* base, int32_t soundIndex, MAYBE_
     inst->gain = N3DSAudio_sanitizeGain(sound != NULL ? sound->volume : 1.0f);
     inst->pitch = N3DSAudio_sanitizePitch((sound != NULL && sound->pitch > 0.0f) ? sound->pitch : 1.0f);
     inst->streamGeneration = 1u;
+
+    if (useMusicStreamPath && !useStreamingPath && audio->workerEnabled) {
+        // Opening the file and reading its header took 75-700 ms on the main thread on hardware (a hitch at every
+        // music change): the worker does it, and the next update sets the channels up.
+        inst->isStream = true;
+        inst->startPending = true;
+        inst->startPath = path;
+        LightEvent_Signal(&audio->workerEvent);
+        int32_t instanceId = inst->instanceId;
+        LightLock_Unlock(&audio->lock);
+        return instanceId;
+    }
 
     if (useStreamingPath || useMusicStreamPath) {
         N3DSBcwav musicBcwav;
@@ -3344,18 +3509,26 @@ static void N3DSAudio_stopAll(AudioSystem* base) {
     LightLock_Unlock(&audio->lock);
 }
 
+// A stream that hasn't finished counts as playing, also while it starts in the background or waits for its first
+// buffer (game code that restarts music it finds not playing would otherwise restart it every frame).
+static bool N3DSAudio_instanceIsPlaying(const N3DSSoundInstance* inst) {
+    if (inst->paused) return false;
+    if (inst->isStream && !inst->streamFinished) return true;
+    return inst->channelId >= 0 && ndspChnIsPlaying(inst->channelId);
+}
+
 static bool N3DSAudio_isPlaying(AudioSystem* base, int32_t soundOrInstance) {
     N3DSAudioSystem* audio = (N3DSAudioSystem*) base;
     LightLock_Lock(&audio->lock);
     if (N3DSAudio_isInstanceId(soundOrInstance)) {
         N3DSSoundInstance* inst = N3DSAudio_findInstanceById(audio, soundOrInstance);
-        bool isPlaying = inst != NULL && ndspChnIsPlaying(inst->channelId) && !inst->paused;
+        bool isPlaying = inst != NULL && N3DSAudio_instanceIsPlaying(inst);
         LightLock_Unlock(&audio->lock);
         return isPlaying;
     }
     repeat(N3DS_MAX_SOUND_INSTANCES, i) {
         if (audio->instances[i].active && audio->instances[i].soundIndex == soundOrInstance) {
-            bool isPlaying = ndspChnIsPlaying(audio->instances[i].channelId) && !audio->instances[i].paused;
+            bool isPlaying = N3DSAudio_instanceIsPlaying(&audio->instances[i]);
             LightLock_Unlock(&audio->lock);
             return isPlaying;
         }
@@ -3371,7 +3544,7 @@ static void N3DSAudio_pauseSound(AudioSystem* base, int32_t soundOrInstance) {
         N3DSSoundInstance* inst = N3DSAudio_findInstanceById(audio, soundOrInstance);
         if (inst != NULL) {
             inst->paused = true;
-            ndspChnSetPaused(inst->channelId, true);
+            if (inst->channelId >= 0) ndspChnSetPaused(inst->channelId, true);
             if (inst->secondaryChannelId >= 0) ndspChnSetPaused(inst->secondaryChannelId, true);
         }
         LightLock_Unlock(&audio->lock);
@@ -3381,7 +3554,7 @@ static void N3DSAudio_pauseSound(AudioSystem* base, int32_t soundOrInstance) {
         N3DSSoundInstance* inst = &audio->instances[i];
         if (inst->active && inst->soundIndex == soundOrInstance) {
             inst->paused = true;
-            ndspChnSetPaused(inst->channelId, true);
+            if (inst->channelId >= 0) ndspChnSetPaused(inst->channelId, true);
             if (inst->secondaryChannelId >= 0) ndspChnSetPaused(inst->secondaryChannelId, true);
         }
     }
@@ -3395,7 +3568,7 @@ static void N3DSAudio_resumeSound(AudioSystem* base, int32_t soundOrInstance) {
         N3DSSoundInstance* inst = N3DSAudio_findInstanceById(audio, soundOrInstance);
         if (inst != NULL) {
             inst->paused = false;
-            ndspChnSetPaused(inst->channelId, false);
+            if (inst->channelId >= 0) ndspChnSetPaused(inst->channelId, false);
             if (inst->secondaryChannelId >= 0) ndspChnSetPaused(inst->secondaryChannelId, false);
         }
         LightLock_Unlock(&audio->lock);
@@ -3405,7 +3578,7 @@ static void N3DSAudio_resumeSound(AudioSystem* base, int32_t soundOrInstance) {
         N3DSSoundInstance* inst = &audio->instances[i];
         if (inst->active && inst->soundIndex == soundOrInstance) {
             inst->paused = false;
-            ndspChnSetPaused(inst->channelId, false);
+            if (inst->channelId >= 0) ndspChnSetPaused(inst->channelId, false);
             if (inst->secondaryChannelId >= 0) ndspChnSetPaused(inst->secondaryChannelId, false);
         }
     }
@@ -3670,7 +3843,7 @@ static void N3DSAudio_setTrackPosition(AudioSystem* base, int32_t soundOrInstanc
             return;
         }
         if (inst->paused) {
-            ndspChnSetPaused(inst->channelId, true);
+            if (inst->channelId >= 0) ndspChnSetPaused(inst->channelId, true);
             if (inst->secondaryChannelId >= 0) ndspChnSetPaused(inst->secondaryChannelId, true);
         }
         LightLock_Unlock(&audio->lock);
@@ -3693,7 +3866,7 @@ static void N3DSAudio_setTrackPosition(AudioSystem* base, int32_t soundOrInstanc
             return;
         }
         if (inst->paused) {
-            ndspChnSetPaused(inst->channelId, true);
+            if (inst->channelId >= 0) ndspChnSetPaused(inst->channelId, true);
             if (inst->secondaryChannelId >= 0) ndspChnSetPaused(inst->secondaryChannelId, true);
         }
         LightLock_Unlock(&audio->lock);

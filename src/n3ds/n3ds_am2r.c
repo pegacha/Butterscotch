@@ -62,6 +62,8 @@ typedef struct {
     int32_t objMenuLabel, objOptionLR, objPauseOption, objWaterFX;
     int32_t objBeam, objMissile, objMissileExpl, objBombExpl, objPBombExpl;
     int32_t objMetroids[4];
+    int32_t objCharacter;
+    int32_t sndSpin[5]; // the spin-jump loops: plain, Space Jump, Screw Attack, both, underwater
     int32_t sprA, sprB, sprX, sprY;
     int32_t sfxPlay, sndMenuMove, sndMenuSel;
     int32_t roomController, roomTitle;
@@ -319,6 +321,11 @@ void N3DSAm2r_init(Runner* runner) {
     gAm2r.roomTitle = N3DSGml_roomIndex("titleroom");
     gAm2r.sndMenuMove = N3DSGml_soundIndex("sndMenuMove");
     gAm2r.sndMenuSel = N3DSGml_soundIndex("sndMenuSel");
+    gAm2r.objCharacter = N3DSGml_objectIndex("oCharacter");
+    {
+        static const char* const kSpin[5] = { "sndSpinJump", "sndSpaceJump", "sndScrewAttack", "sndSpaceScrewAttack", "sndSpinJumpWater" };
+        repeat(5, i) gAm2r.sndSpin[i] = N3DSGml_soundIndex(kSpin[i]);
+    }
     gAm2r.active = gAm2r.objOptionsMain >= 0 && gAm2r.objControl >= 0;
     if (!gAm2r.active) return;
 
@@ -603,8 +610,27 @@ static void N3DSAm2r_checkWidescreenSurface(void) {
     renderer->vtable->surfaceFree(renderer, id);
 }
 
+// Only the spin-jump loop the game tracks (oCharacter.spinjump_sound) may play. Entering water, the character step
+// stops the loop, picks the sound again before setting inwater (so the same one), and later in the same step finds it
+// not playing and restarts it; from the next step it tracks the underwater sound, and the restarted loop played until
+// Samus left the water. Any other spin loop still playing after the step is stopped here.
+static void N3DSAm2r_stopStraySpinLoops(void) {
+    if (gAm2r.objCharacter < 0) return;
+    Instance* samus = N3DSGml_firstInstance(gAm2r.objCharacter);
+    double current = -1.0;
+    if (samus == NULL || !N3DSGml_getVar(samus, "spinjump_sound", &current)) return;
+    AudioSystem* audio = gAm2r.runner->audioSystem;
+    if (audio == NULL) return;
+    repeat(5, i) {
+        int32_t sound = gAm2r.sndSpin[i];
+        if (sound < 0 || sound == (int32_t) current) continue;
+        if (audio->vtable->isPlaying(audio, sound)) audio->vtable->stopSound(audio, sound);
+    }
+}
+
 void N3DSAm2r_update(void) {
     if (!gAm2r.active) return;
+    N3DSAm2r_stopStraySpinLoops();
     N3DSAm2r_checkWidescreenSurface();
     N3DSAm2r_dropWaterFilter();
     N3DSAm2r_hideKeyboardRow();

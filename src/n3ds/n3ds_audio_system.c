@@ -3591,7 +3591,7 @@ static void N3DSAudio_pauseAll(AudioSystem* base) {
     repeat(N3DS_MAX_SOUND_INSTANCES, i) {
         if (audio->instances[i].active) {
             audio->instances[i].paused = true;
-            ndspChnSetPaused(audio->instances[i].channelId, true);
+            if (audio->instances[i].channelId >= 0) ndspChnSetPaused(audio->instances[i].channelId, true);
             if (audio->instances[i].secondaryChannelId >= 0) ndspChnSetPaused(audio->instances[i].secondaryChannelId, true);
         }
     }
@@ -3604,7 +3604,7 @@ static void N3DSAudio_resumeAll(AudioSystem* base) {
     repeat(N3DS_MAX_SOUND_INSTANCES, i) {
         if (audio->instances[i].active) {
             audio->instances[i].paused = false;
-            ndspChnSetPaused(audio->instances[i].channelId, false);
+            if (audio->instances[i].channelId >= 0) ndspChnSetPaused(audio->instances[i].channelId, false);
             if (audio->instances[i].secondaryChannelId >= 0) ndspChnSetPaused(audio->instances[i].secondaryChannelId, false);
         }
     }

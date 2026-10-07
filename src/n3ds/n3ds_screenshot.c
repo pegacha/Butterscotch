@@ -60,6 +60,7 @@ void N3DSScreenshot_captureIfRequested(Renderer* renderer) {
     if (gRequestedFrame < 0) return;
     int32_t frame = gRequestedFrame;
     gRequestedFrame = -1;
+    N3DSRenderer_frameGate(); // the last finished frame, once the GPU is done with it
     mkdir(N3DS_SD_DIR "shots", 0777);
     char path[128];
     snprintf(path, sizeof(path), N3DS_SD_DIR "shots/frame_%05d.png", (int) frame);

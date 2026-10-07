@@ -43,6 +43,13 @@ int32_t N3DSRenderer_findTileEntryIndex(Renderer* renderer, int32_t backgroundIn
 bool N3DSRenderer_drawCachedTileEntry(Renderer* renderer, int32_t tileEntryIndex, float drawX, float drawY, float xscale, float yscale, uint32_t color, float alpha);
 // Loads the textures a room is likely to need (call when the room changes).
 void N3DSRenderer_prewarmRoom(Renderer* renderer, Runner* runner);
+// The frame gate (see n3ds_renderer.c): frameGate opens the GPU frame if it isn't open (C3D_FrameBegin: waits for the
+// previous frame and the vblank); frameEnd submits it.
+void N3DSRenderer_frameGate(void);
+void N3DSRenderer_frameEnd(void);
+bool N3DSRenderer_frameIsOpen(void);
+double N3DSRenderer_frameWaitMs(void);
+double N3DSRenderer_frameGpuMs(void);
 C3D_RenderTarget* N3DSRenderer_getTopTarget(Renderer* renderer);
 C3D_RenderTarget* N3DSRenderer_getBottomTarget(Renderer* renderer);
 // Deletes surfaces freed during earlier frames. Call outside C3D_FrameBegin/End; all = everything (shutdown).

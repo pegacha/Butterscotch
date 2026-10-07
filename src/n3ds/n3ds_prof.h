@@ -58,6 +58,7 @@ typedef enum {
     N3DS_ZONE_STATE,         // blend mode, alpha test (each can force a GPU flush)
     N3DS_ZONE_GPU_FLUSH,     // citro2d batch submissions
     N3DS_ZONE_PAGE_LOAD,     // atlas page / sprite sheet loads and uploads
+    N3DS_ZONE_FRAME_WAIT,    // C3D_FrameBegin: the previous frame's GPU work and the vblank
     N3DS_ZONE_COUNT
 } N3DSZone;
 

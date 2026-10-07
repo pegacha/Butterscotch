@@ -5511,6 +5511,7 @@ static inline uint32_t N3DSRenderer_morton(uint32_t x, uint32_t y) {
 // 8x8 Morton tiles, first row at the top.
 // Copies a screen's finished color buffer (w x h on screen) into a texture (allocated on first use).
 static bool N3DSRenderer_copyScreen(C3D_RenderTarget* target, uint32_t w, uint32_t h, C3D_Tex* tex, Tex3DS_SubTexture* subtex) {
+    N3DSRenderer_frameGate(); // the previous frame must be finished (and not yet cleared)
     if (target == NULL || target->frameBuf.colorBuf == NULL) return false;
     if (tex->data == NULL && !C3D_TexInit(tex, N3DS_FROZEN_TEX_W, N3DS_FROZEN_TEX_H, GPU_RGBA8)) return false;
     const uint32_t fbW = target->frameBuf.width; // 240: the screens are rotated
@@ -5556,6 +5557,7 @@ bool N3DSRenderer_hasBottomSnapshot(Renderer* base) {
 // Frees the frozen frame (call at the start of a frame: the GPU is done with it).
 void N3DSRenderer_dropFrozenTop(Renderer* base) {
     N3DSRenderer* renderer = (N3DSRenderer*) base;
+    if (renderer->frozenTop.data != NULL) N3DSRenderer_frameGate(); // the GPU may still be drawing with it
     renderer->frozenTopValid = false;
     if (renderer->frozenTop.data != NULL) C3D_TexDelete(&renderer->frozenTop);
     memset(&renderer->frozenTop, 0, sizeof(renderer->frozenTop));
@@ -6193,9 +6195,52 @@ static RendererVtable N3DSRenderer_vtable = {
     .setMatrix = N3DSRenderer_setMatrix,
 };
 
+// ===[ Frame gate ]===
+// The main loop runs the game step while the GPU still draws the previous frame. Until C3D_FrameBegin has waited for
+// that frame, citro3d's command buffer and citro2d's vertex buffer are the GPU's, so nothing may draw, change a target or
+// upload: the renderer's vtable is wrapped (n3ds_gate_vtable.inc) so that the first such call opens the frame, wherever
+// it comes from (Samus is drawn to a surface in End Step, for one). The main loop opens it before drawing if no step
+// code did.
+static bool gFrameOpen;
+static double gFrameWaitMs, gFrameGpuMs;
+
+void N3DSRenderer_frameGate(void) {
+    if (gFrameOpen) return;
+    N3DS_ZONE(N3DS_ZONE_FRAME_WAIT);
+    u64 start = svcGetSystemTick();
+    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    gFrameWaitMs = (double) (svcGetSystemTick() - start) * 1000.0 / (double) SYSCLOCK_ARM11;
+    gFrameGpuMs = C3D_GetDrawingTime();
+    gFrameOpen = true;
+}
+
+void N3DSRenderer_frameEnd(void) {
+    N3DSRenderer_frameGate();
+    C3D_FrameEnd(0);
+    gFrameOpen = false;
+}
+
+bool N3DSRenderer_frameIsOpen(void) {
+    return gFrameOpen;
+}
+
+// The last opening's wait (for the previous frame's GPU work and the vblank) and that frame's GPU drawing time.
+double N3DSRenderer_frameWaitMs(void) {
+    return gFrameWaitMs;
+}
+
+double N3DSRenderer_frameGpuMs(void) {
+    return gFrameGpuMs;
+}
+
+#include "n3ds_gate_vtable.inc"
+
+static RendererVtable N3DSRenderer_gateVtable;
+
 Renderer* N3DSRenderer_create(void) {
     N3DSRenderer* renderer = safeCalloc(1, sizeof(N3DSRenderer));
-    renderer->base.vtable = &N3DSRenderer_vtable;
+    N3DSGate_install(&N3DSRenderer_gateVtable, &N3DSRenderer_vtable);
+    renderer->base.vtable = &N3DSRenderer_gateVtable;
     renderer->base.drawColor = 0xFFFFFF;
     renderer->base.drawAlpha = 1.0f;
     renderer->base.drawFont = -1;

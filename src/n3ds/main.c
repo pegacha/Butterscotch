@@ -78,7 +78,7 @@ static const char* const gN3DSZoneNames[N3DS_ZONE_COUNT] = {
     "step (GML, collisions)", "frame start", "views (GML draw, layers)", "post (game -> screen)", "draw GUI (GML)",
     "overlays (map, monitor)", "room change", "after frame (gc, files)", "sprites", "sprite parts", "sprite pos",
     "tiles", "tiled", "text", "shapes", "surface draws", "surface targets", "view setup", "blend/alpha state",
-    "GPU flushes", "texture loads",
+    "GPU flushes", "texture loads", "frame wait (GPU, vblank)",
 };
 
 // The frame profiler's per-room report: each zone's exclusive time per frame, biggest first, then the GML profile.
@@ -397,7 +397,7 @@ static void N3DSLoadingScreen_draw(N3DSLoadingScreen* screen) {
         char detailLine[64];
         snprintf(detailLine, sizeof(detailLine), "%d / %d chunks", screen->chunkIndex, screen->totalChunks);
 
-        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+        N3DSRenderer_frameGate();
         C2D_TargetClear(screen->target, C2D_Color32(8, 10, 14, 255));
         C2D_SceneBegin(screen->target);
 
@@ -427,7 +427,7 @@ static void N3DSLoadingScreen_draw(N3DSLoadingScreen* screen) {
             logY += 12.0f;
         }
 
-        C3D_FrameEnd(0);
+        N3DSRenderer_frameEnd();
         gspWaitForVBlank();
         return;
     }
@@ -741,10 +741,10 @@ int main(int argc, char** argv) {
     int32_t inputFrame = 0;
     if (fileExists(N3DS_SD_DIR "inputs.json")) inputPlayback = InputRecording_createPlayer(N3DS_SD_DIR "inputs.json", NULL);
 
-    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    N3DSRenderer_frameGate();
     Runner_initFirstRoom(runner);
     renderer->vtable->flush(renderer);
-    C3D_FrameEnd(0);
+    N3DSRenderer_frameEnd();
     N3DSRenderer_collectGarbage(renderer, false);
     N3DS_logMemory("first room");
 
@@ -796,10 +796,10 @@ int main(int argc, char** argv) {
         InputRecording_processFrame(inputPlayback, runner->keyboard, inputFrame++);
         if (N3DSInput_takeMonitorToggle()) debugMonitorVisible = !debugMonitorVisible;
 
-        u64 waitStartTick = svcGetSystemTick();
-        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
-        double waitMs = (double) (svcGetSystemTick() - waitStartTick) * 1000.0 / (double) SYSCLOCK_ARM11;
-        double gpuMs = C3D_GetDrawingTime();
+        // The GPU frame isn't opened here: the step runs while the GPU still draws the previous frame, and the first
+        // renderer call that needs the GPU opens it (N3DSRenderer_frameGate), else the drawing below does. (The screen
+        // captures here open it themselves when they run.)
+        bool frameOpenBeforeStep = N3DSRenderer_frameIsOpen();
         N3DSScreenshot_captureIfRequested(renderer);
         N3DSLiveMap_beginFrame();
         // Before the step: freezes the top screen when the pause screen opens and turns touches into its presses.
@@ -841,6 +841,11 @@ int main(int argc, char** argv) {
             runner->audioSystem->vtable->update(runner->audioSystem, dt);
         }
         double stepMs = (double) (svcGetSystemTick() - stepStartTick) * 1000.0 / (double) SYSCLOCK_ARM11;
+        bool frameOpenedInStep = !frameOpenBeforeStep && N3DSRenderer_frameIsOpen();
+        N3DSRenderer_frameGate();
+        double waitMs = N3DSRenderer_frameWaitMs();
+        double gpuMs = N3DSRenderer_frameGpuMs();
+        if (frameOpenedInStep) stepMs -= waitMs; // the wait happened inside the step: count it as wait
 
         bool roomChanged = runner->currentRoom != lastRoom;
         if (roomChanged) {
@@ -951,7 +956,7 @@ int main(int argc, char** argv) {
             renderer->vtable->flush(renderer);
         }
         double roomChangeMs = N3DSProf_ms(svcGetSystemTick() - roomChangeStartTick);
-        C3D_FrameEnd(0);
+        N3DSRenderer_frameEnd();
         u64 gcStartTick = svcGetSystemTick();
 #ifdef N3DS_FRAME_PROFILER
         int afterFrameZone = N3DSZone_enter(N3DS_ZONE_AFTER_FRAME);
@@ -1056,6 +1061,7 @@ int main(int argc, char** argv) {
     DataWin_free(dataWin);
     N3DSLog_close();
     if (citroReady) {
+        if (N3DSRenderer_frameIsOpen()) N3DSRenderer_frameEnd(); // opened by shutdown code, if any
         C2D_Fini();
         C3D_Fini();
     }

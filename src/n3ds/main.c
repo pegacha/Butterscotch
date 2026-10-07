@@ -748,7 +748,7 @@ int main(int argc, char** argv) {
     N3DSRenderer_collectGarbage(renderer, false);
     N3DS_logMemory("first room");
 
-    bool debugMonitorVisible = true;
+    bool debugMonitorVisible = false; // Start+Select shows it
     const Room* lastRoom = NULL;
     uint64_t lastFrameStartTime = nowNanos();
     u64 statsStartMs = osGetTime();
@@ -889,7 +889,9 @@ int main(int argc, char** argv) {
         runner->widescreenExtraWidth = 0;
         runner->widescreenExtraHeight = 0;
         // AM2R 1.5's own widescreen (a 426x240 picture): the game's width instead of the upstream hack.
-        int32_t ownGameW = N3DSAm2r_gameWidth();
+        // (Not on the pause screen: it goes to the 320-wide bottom screen 1:1, where the game, told the window is 320,
+        // centres its widescreen pause picture and the side margins fall off; 426 would be shrunk to fit.)
+        int32_t ownGameW = N3DSPause_isPaused() ? 0 : N3DSAm2r_gameWidth();
         if (gScreenMode == N3DS_SCREEN_WIDE && ownGameW == 0 && runner->usingAppSurface && gameW > 0 && gameH > 0) {
             int32_t targetW = (int32_t) ((float) gameH * ((float) N3DS_TOP_SCREEN_W / (float) N3DS_TOP_SCREEN_H) + 0.5f);
             if (targetW > gameW) {

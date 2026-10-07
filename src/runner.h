@@ -934,6 +934,11 @@ struct Runner {
 
     // GameMaker surface "stack".
     int32_t surfaceStack[MAX_SURFACES];
+    // The view and projection matrices in use when each slot was pushed, put back when it is popped (as GameMaker
+    // does): a surface_set_target / surface_reset_target pair inside a Draw event that runs while a view draws into its
+    // own surface (view_surface_id) must leave that view's camera in place.
+    Matrix4f surfaceStackView[MAX_SURFACES];
+    Matrix4f surfaceStackProjection[MAX_SURFACES];
 
     // GUI-pass state: when inGuiPass is set, popping the surface stack empty must restore the GUI target + projection, not the room view.
     bool inGuiPass;

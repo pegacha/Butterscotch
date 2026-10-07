@@ -1,0 +1,22 @@
+# AM2R 1.5.5: new game in slot A, intro skipped, then into rm_a2h02 (water, and the Hydro Station title card);
+# screenshots while the card is up and after it has gone.
+seed 12345
+after_room titleroom
+press 800 START 4
+press 900 START 4
+press 1000 A 4
+press 1100 A 4
+press 1200 A 4
+after_room gameintroroom
+press 60 START 4
+press 120 START 4
+press 180 A 4
+after_room rm_a0h01
+goto 200 rm_a2h02
+after_room rm_a2h02
+place 5 1920 840
+screenshot 100
+screenshot 200
+screenshot 300
+screenshot 600
+exit 620

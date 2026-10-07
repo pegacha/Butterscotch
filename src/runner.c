@@ -4958,6 +4958,8 @@ bool Runner_surfaceSetTarget(Runner* runner, int32_t surfaceID) {
     if (slot == -1) return false;
 
     runner->surfaceStack[slot] = surfaceID;
+    runner->surfaceStackView[slot] = runner->renderer->gmlMatrices[MATRIX_VIEW];
+    runner->surfaceStackProjection[slot] = runner->renderer->gmlMatrices[MATRIX_PROJECTION];
     runner->renderer->vtable->flush(runner->renderer);
     return runner->renderer->vtable->setRenderTarget(runner->renderer, surfaceID, false);
 }
@@ -4974,6 +4976,9 @@ bool Runner_surfaceResetTarget(Runner* runner) {
     int32_t newTop = findStackTop(runner);
     int32_t newTarget = newTop == -1 ? runner->applicationSurfaceId : runner->surfaceStack[newTop];
     runner->renderer->vtable->setRenderTarget(runner->renderer, newTarget, newTop == -1);
+    // Back on the outer target (the view's own surface, or the application surface): its matrices, not the popped
+    // surface's pixel space (which surface_set_target left in gmlMatrices).
+    runner->renderer->vtable->applyProjection(runner->renderer, &runner->surfaceStackView[top], &runner->surfaceStackProjection[top]);
     if (newTop == -1 && runner->inGuiPass) {
         // Inside Pre Draw / Post Draw / Draw GUI the base target is the GUI pass target with the GUI projection, not the room view.
         // (See GameMaker-HTML5's g_InGUI_Zone)

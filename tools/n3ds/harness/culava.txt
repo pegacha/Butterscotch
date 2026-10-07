@@ -1,0 +1,28 @@
+# AM2R 1.5.5: Samus in the lava of rm_a0h07 (lava level 192), jumping; screenshots around the jump and landing.
+seed 12345
+after_room titleroom
+press 800 START 4
+press 900 START 4
+press 1000 A 4
+press 1100 A 4
+press 1200 A 4
+after_room gameintroroom
+press 60 START 4
+press 120 START 4
+press 180 A 4
+after_room rm_a0h01
+goto 200 rm_a0h07
+after_room rm_a0h07
+place 5 640 120
+screenshot 60
+press 80 B 20
+screenshot 90
+screenshot 105
+screenshot 120
+screenshot 135
+screenshot 150
+place 160 300 120
+press 200 B 20
+screenshot 225
+screenshot 250
+exit 270

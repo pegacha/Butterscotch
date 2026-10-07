@@ -1,0 +1,21 @@
+# AM2R 1.5.5: new game in slot A, intro skipped, pause in the first room; screenshots of the pause screen pages.
+seed 12345
+after_room titleroom
+press 800 START 4
+press 900 START 4
+press 1000 A 4
+press 1100 A 4
+press 1200 A 4
+after_room gameintroroom
+press 60 START 4
+press 120 START 4
+press 180 A 4
+after_room rm_a0h01
+screenshot 200
+press 300 START 4
+screenshot 420
+press 500 R 4
+screenshot 600
+press 700 R 4
+screenshot 800
+exit 900

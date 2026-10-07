@@ -37,6 +37,8 @@ jobs:
       BANNERTOOL_REF: "1.2.0"
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the commit count is the CIA's title version (cmake/n3ds.cmake)
 
       - name: Get commit info
         id: commit-info

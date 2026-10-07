@@ -105,6 +105,15 @@ ctr_create_3dsx(butterscotch_3dsx TARGET butterscotch OUTPUT ${N3DS_OUTPUT_NAME}
 # Installable title. As a title it gets its own memory mode (124 MB, 804 MHz, L2 cache on New 3DS: res/n3ds/app.rsf);
 # every build has the same title ID, so installing a new .cia replaces the old one and keeps the SD data and saves.
 find_program(N3DS_MAKEROM makerom HINTS "${N3DS_TOOLS_DIR}")
+# Title version: the commit count, so every build is newer than the last. The HOME Menu keeps a title's icon (SMDH) in
+# a cache it refreshes only when the installed version changes; with every build at version 0, a new icon never showed.
+set(N3DS_TITLE_VERSION 0)
+execute_process(COMMAND git rev-list --count HEAD WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    OUTPUT_VARIABLE _n3ds_commit_count OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET RESULT_VARIABLE _n3ds_git_result)
+if(_n3ds_git_result EQUAL 0 AND _n3ds_commit_count MATCHES "^[0-9]+$")
+    math(EXPR N3DS_TITLE_VERSION "${_n3ds_commit_count} % 65536")
+endif()
+message(STATUS "n3ds: title version ${N3DS_TITLE_VERSION}")
 find_program(N3DS_BANNERTOOL bannertool HINTS "${N3DS_TOOLS_DIR}")
 if(N3DS_MAKEROM)
     set(_n3ds_banner_args "")
@@ -121,7 +130,7 @@ if(N3DS_MAKEROM)
         COMMAND "${N3DS_MAKEROM}" -f cia -o ${N3DS_OUTPUT_NAME}.cia -target t -exefslogo
                 -elf "$<TARGET_FILE:butterscotch>"
                 -rsf "${CMAKE_SOURCE_DIR}/res/n3ds/app.rsf"
-                -icon "${N3DS_SMDH_FILE}" ${_n3ds_banner_args}
+                -icon "${N3DS_SMDH_FILE}" ${_n3ds_banner_args} -ver ${N3DS_TITLE_VERSION}
                 "-DAPP_TITLE=${N3DS_APP_NAME}" "-DAPP_PRODUCT_CODE=${N3DS_PRODUCT_CODE}"
                 "-DAPP_UNIQUE_ID=${N3DS_UNIQUE_ID}" "-DAPP_ROMFS=${N3DS_ROMFS_DIR}"
         DEPENDS butterscotch butterscotch_3dsx ${_n3ds_banner_deps} "${CMAKE_SOURCE_DIR}/res/n3ds/app.rsf"

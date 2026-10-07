@@ -1,0 +1,25 @@
+# Frame-profiler run: goto each room, Samus near its centre, 400 frames each, no screenshots (they stall a frame).
+after_room titleroom
+press 800 START 4
+press 900 START 4
+press 1000 A 4
+press 1100 A 4
+after_room rm_a0h01
+goto 300 rm_a0h02
+after_room rm_a0h02
+place 5 800 240
+goto 400 rm_a2h02
+after_room rm_a2h02
+place 5 1920 840
+goto 400 rm_a5h04
+after_room rm_a5h04
+place 5 1120 1080
+goto 400 rm_a3h04
+after_room rm_a3h04
+place 5 1440 840
+goto 400 rm_a6b14
+after_room rm_a6b14
+place 5 960 360
+goto 400 rm_a0h01
+after_room rm_a0h01
+exit 30

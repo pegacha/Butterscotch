@@ -1,0 +1,37 @@
+# AM2R 1.5.5 frame-profiler run: new game in slot A (Normal), intro skipped, then each room with Samus near its
+# centre for 400 frames; one screenshot per room (at frame 300, after the averages have most of their frames).
+after_room titleroom
+press 800 START 4
+press 900 START 4
+press 1000 A 4
+press 1100 A 4
+press 1200 A 4
+after_room gameintroroom
+press 60 START 4
+press 120 START 4
+press 180 A 4
+after_room rm_a0h01
+screenshot 200
+goto 300 rm_a0h02
+after_room rm_a0h02
+place 5 800 240
+screenshot 300
+goto 400 rm_a2h02
+after_room rm_a2h02
+place 5 1920 840
+screenshot 300
+goto 400 rm_a5h04
+after_room rm_a5h04
+place 5 1120 1080
+screenshot 300
+goto 400 rm_a3h04
+after_room rm_a3h04
+place 5 1440 840
+screenshot 300
+goto 400 rm_a6b14
+after_room rm_a6b14
+place 5 960 360
+screenshot 300
+goto 400 rm_a0h01
+after_room rm_a0h01
+exit 30

@@ -67,6 +67,60 @@ static int gN3DSBootLogLineCount = 0;
 
 u64 gN3DSProfTicks[N3DS_PROF_COUNT];
 u32 gN3DSProfFlushes;
+#ifdef N3DS_FRAME_PROFILER
+u64 gN3DSZoneTicks[N3DS_ZONE_COUNT];
+u32 gN3DSZoneCalls[N3DS_ZONE_COUNT];
+int gN3DSZoneStack[64];
+int gN3DSZoneDepth;
+u64 gN3DSZoneMark;
+
+static const char* const gN3DSZoneNames[N3DS_ZONE_COUNT] = {
+    "step (GML, collisions)", "frame start", "views (GML draw, layers)", "post (game -> screen)", "draw GUI (GML)",
+    "overlays (map, monitor)", "room change", "after frame (gc, files)", "sprites", "sprite parts", "sprite pos",
+    "tiles", "tiled", "text", "shapes", "surface draws", "surface targets", "view setup", "blend/alpha state",
+    "GPU flushes", "texture loads",
+};
+
+// The frame profiler's per-room report: each zone's exclusive time per frame, biggest first, then the GML profile.
+static void N3DS_logRoomProfile(const char* roomName, uint32_t frames, double gpuMs, VMContext* vm) {
+    if (frames == 0) return;
+    int order[N3DS_ZONE_COUNT];
+    for (int i = 0; i < N3DS_ZONE_COUNT; i++) order[i] = i;
+    for (int i = 1; i < N3DS_ZONE_COUNT; i++) {
+        for (int j = i; j > 0 && gN3DSZoneTicks[order[j]] > gN3DSZoneTicks[order[j - 1]]; j--) {
+            int t = order[j]; order[j] = order[j - 1]; order[j - 1] = t;
+        }
+    }
+    logInfo("Profile: %s, %lu frames; GPU drawing %.2f ms/frame; CPU by zone (exclusive ms/frame, calls/frame):\n",
+        roomName, (unsigned long) frames, gpuMs / (double) frames);
+    for (int i = 0; i < N3DS_ZONE_COUNT; i++) {
+        int z = order[i];
+        double ms = N3DSProf_ms(gN3DSZoneTicks[z]) / (double) frames;
+        // (Count-only zones, like tiles, show 0 ms.)
+        if (ms < 0.05 && gN3DSZoneCalls[z] < frames * 100u) continue;
+        logInfo("Profile:   %6.2f ms  %7.1f  %s\n", ms, (double) gN3DSZoneCalls[z] / (double) frames, gN3DSZoneNames[z]);
+    }
+    memset(gN3DSZoneTicks, 0, sizeof(gN3DSZoneTicks));
+    memset(gN3DSZoneCalls, 0, sizeof(gN3DSZoneCalls));
+#ifdef ENABLE_VM_GML_PROFILER
+    char* report = Profiler_createReport(vm->profiler, 40, (int) frames);
+    if (report != NULL) {
+        // A line at a time: one log line has a size limit.
+        logInfo("Profile: GML (self time incl. builtins, avg over the room's frames):\n");
+        for (char* line = report; line != NULL && *line != '\0';) {
+            char* next = strchr(line, '\n');
+            if (next != NULL) *next++ = '\0';
+            logInfo("Profile:   %s\n", line);
+            line = next;
+        }
+        free(report);
+    }
+    Profiler_reset(vm->profiler);
+#else
+    (void) vm;
+#endif
+}
+#endif
 
 // Where one frame's time went, in ms. Step is the game logic (GML), wait is citro3d waiting for the GPU and VBlank,
 // draw is building the GPU commands; IO, TX, FS and AU are slices of those (see n3ds_prof.h).
@@ -703,6 +757,10 @@ int main(int argc, char** argv) {
     double pacedSpeed = 0.0;
     uint32_t lastUnimplCount = 0;
     u64 lastSlowLogMs = 0;
+    struct {
+        uint32_t frames;
+        double stepMs, waitMs, drawMs, frameMs, worstMs, flushes, instances, gpuMs;
+    } roomStats = {0};
     double statsMaxFrameMs = 0.0;
 
     while (aptMainLoop() && !runner->shouldExit) {
@@ -741,14 +799,18 @@ int main(int argc, char** argv) {
         u64 waitStartTick = svcGetSystemTick();
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
         double waitMs = (double) (svcGetSystemTick() - waitStartTick) * 1000.0 / (double) SYSCLOCK_ARM11;
+        double gpuMs = C3D_GetDrawingTime();
         N3DSScreenshot_captureIfRequested(renderer);
         N3DSLiveMap_beginFrame();
         // Before the step: freezes the top screen when the pause screen opens and turns touches into its presses.
         bool paused = N3DSPause_update();
         u64 stepStartTick = svcGetSystemTick();
-        Runner_step(runner);
-        N3DSAm2r_update();
-#ifdef ENABLE_VM_GML_PROFILER
+        {
+            N3DS_ZONE(N3DS_ZONE_STEP);
+            Runner_step(runner);
+            N3DSAm2r_update();
+        }
+#if defined(ENABLE_VM_GML_PROFILER) && !defined(N3DS_FRAME_PROFILER)
         if (runner->frameCount > 0 && runner->frameCount % 120 == 0) {
             char* report = Profiler_createReport(vm->profiler, 25, 120);
             if (report != NULL) {
@@ -771,14 +833,30 @@ int main(int argc, char** argv) {
             N3DSInput_update(runner);
             InputRecording_processFrame(inputPlayback, runner->keyboard, inputFrame++);
             if (N3DSInput_takeMonitorToggle()) debugMonitorVisible = !debugMonitorVisible;
-            Runner_step(runner);
-            N3DSAm2r_update();
+            {
+                N3DS_ZONE(N3DS_ZONE_STEP);
+                Runner_step(runner);
+                N3DSAm2r_update();
+            }
             runner->audioSystem->vtable->update(runner->audioSystem, dt);
         }
         double stepMs = (double) (svcGetSystemTick() - stepStartTick) * 1000.0 / (double) SYSCLOCK_ARM11;
 
         bool roomChanged = runner->currentRoom != lastRoom;
         if (roomChanged) {
+            // How the room just left ran, as a whole (the Perf line is per 5 s and mixes rooms).
+            if (lastRoom != NULL && roomStats.frames > 0) {
+                double n = (double) roomStats.frames;
+                logInfo("Room perf: %s %lu frames, %.1f fps; avg step %.2f + wait %.2f + draw %.2f ms (frame %.2f), worst %.0f ms; "
+                        "GPU drawing %.2f ms; avg %.0f GPU flushes, %.0f instances\n",
+                    lastRoom->name, (unsigned long) roomStats.frames, n * 1000.0 / (roomStats.frameMs > 0.0 ? roomStats.frameMs : 1.0),
+                    roomStats.stepMs / n, roomStats.waitMs / n, roomStats.drawMs / n, roomStats.frameMs / n, roomStats.worstMs,
+                    roomStats.gpuMs / n, roomStats.flushes / n, roomStats.instances / n);
+#ifdef N3DS_FRAME_PROFILER
+                N3DS_logRoomProfile(lastRoom->name, roomStats.frames, roomStats.gpuMs, vm);
+#endif
+            }
+            memset(&roomStats, 0, sizeof(roomStats));
             lastRoom = runner->currentRoom;
             logInfo("Room %d: %s (%dx%d, speed %d)\n", (int) runner->currentRoomIndex, runner->currentRoom->name,
                 (int) runner->currentRoom->width, (int) runner->currentRoom->height, (int) runner->currentRoom->speed);
@@ -810,7 +888,9 @@ int main(int argc, char** argv) {
         // 400x240. Pillarbox: native size 1:1, centred.
         runner->widescreenExtraWidth = 0;
         runner->widescreenExtraHeight = 0;
-        if (gScreenMode == N3DS_SCREEN_WIDE && runner->usingAppSurface && gameW > 0 && gameH > 0) {
+        // AM2R 1.5's own widescreen (a 426x240 picture): the game's width instead of the upstream hack.
+        int32_t ownGameW = N3DSAm2r_gameWidth();
+        if (gScreenMode == N3DS_SCREEN_WIDE && ownGameW == 0 && runner->usingAppSurface && gameW > 0 && gameH > 0) {
             int32_t targetW = (int32_t) ((float) gameH * ((float) N3DS_TOP_SCREEN_W / (float) N3DS_TOP_SCREEN_H) + 0.5f);
             if (targetW > gameW) {
                 runner->widescreenExtraWidth = targetW - gameW;
@@ -822,40 +902,65 @@ int main(int argc, char** argv) {
         bool stretch = gScreenMode == N3DS_SCREEN_STRETCH;
         int32_t fixedScale = gScreenMode == N3DS_SCREEN_1X ? 1 : gScreenMode == N3DS_SCREEN_2X ? 2 : 0;
         bool gameSizedWindow = stretch || fixedScale > 0;
-        gWindowW = gameSizedWindow ? (runner->usingAppSurface ? runner->applicationWidth : (int32_t) gen8->defaultWindowWidth) : N3DS_TOP_SCREEN_W;
+        gWindowW = gameSizedWindow ? (ownGameW > 0 ? ownGameW : runner->usingAppSurface ? runner->applicationWidth : (int32_t) gen8->defaultWindowWidth) : N3DS_TOP_SCREEN_W;
         gWindowH = gameSizedWindow ? (runner->usingAppSurface ? runner->applicationHeight : (int32_t) gen8->defaultWindowHeight) : N3DS_TOP_SCREEN_H;
         N3DSRenderer_setStretchToScreen(renderer, stretch);
         N3DSRenderer_setFixedScale(renderer, fixedScale);
 
         u64 drawStartTick = svcGetSystemTick();
-        Runner_drawPre(runner, gWindowW, gWindowH);
-        Runner_beginFrame(runner, gameW, gameH, gWindowW, gWindowH, gWindowW, gWindowH);
-        Runner_drawViews(runner, gameW, gameH, false);
-        renderer->vtable->endFrameInit(renderer);
-        Runner_drawPost(runner, gWindowW, gWindowH);
-        renderer->vtable->endFrameEnd(renderer);
-        Runner_drawGUI(runner, gWindowW, gWindowH, gameW, gameH);
+        {
+            N3DS_ZONE(N3DS_ZONE_FRAME_START);
+            Runner_drawPre(runner, gWindowW, gWindowH);
+            Runner_beginFrame(runner, gameW, gameH, gWindowW, gWindowH, gWindowW, gWindowH);
+        }
+        {
+            N3DS_ZONE(N3DS_ZONE_VIEWS);
+            Runner_drawViews(runner, gameW, gameH, false);
+        }
+        {
+            N3DS_ZONE(N3DS_ZONE_POST);
+            renderer->vtable->endFrameInit(renderer);
+            Runner_drawPost(runner, gWindowW, gWindowH);
+            renderer->vtable->endFrameEnd(renderer);
+        }
+        {
+            N3DS_ZONE(N3DS_ZONE_GUI);
+            // AM2R 1.5 draws its HUD in window coordinates (it centres a 426-wide picture in the window itself).
+            Runner_drawGUI(runner, gWindowW, gWindowH, ownGameW > 0 ? gWindowW : gameW, ownGameW > 0 ? gWindowH : gameH);
+        }
 #ifdef N3DS_DIAG_PATTERN
         if (runner->frameCount % 300 == 5) N3DSRenderer_logDiag(renderer);
 #endif
-        if (paused) N3DSRenderer_drawFrozenTop(renderer);
-        if (N3DSPause_inPlay() && N3DSLiveMap_available()) N3DSLiveMap_draw();
-        else if (N3DSPause_showMapOnBottom()) N3DSRenderer_drawBottomSnapshot(renderer);
-        if (debugMonitorVisible) N3DSDebugMonitor_draw(&debugMonitor, runner, renderer, paused);
-        N3DSSavingIndicator_draw(&savingIndicator, renderer, N3DSCachedFileSystem_isSaving(fileSystem));
-        renderer->vtable->flush(renderer);
+        {
+            N3DS_ZONE(N3DS_ZONE_OVERLAYS);
+            if (paused) N3DSRenderer_drawFrozenTop(renderer);
+            if (N3DSPause_inPlay() && N3DSLiveMap_available()) N3DSLiveMap_draw();
+            else if (N3DSPause_showMapOnBottom()) N3DSRenderer_drawBottomSnapshot(renderer);
+            if (debugMonitorVisible) N3DSDebugMonitor_draw(&debugMonitor, runner, renderer, paused);
+            N3DSSavingIndicator_draw(&savingIndicator, renderer, N3DSCachedFileSystem_isSaving(fileSystem));
+            renderer->vtable->flush(renderer);
+        }
         // After the frame's drawing (all counted as draw): the room change, the renderer's texture collection and the
         // game files' write-back, timed on their own for the slow-frame line.
         u64 roomChangeStartTick = svcGetSystemTick();
-        Runner_handlePendingRoomChange(runner);
-        renderer->vtable->flush(renderer);
+        {
+            N3DS_ZONE(N3DS_ZONE_ROOM_CHANGE);
+            Runner_handlePendingRoomChange(runner);
+            renderer->vtable->flush(renderer);
+        }
         double roomChangeMs = N3DSProf_ms(svcGetSystemTick() - roomChangeStartTick);
         C3D_FrameEnd(0);
         u64 gcStartTick = svcGetSystemTick();
+#ifdef N3DS_FRAME_PROFILER
+        int afterFrameZone = N3DSZone_enter(N3DS_ZONE_AFTER_FRAME);
+#endif
         N3DSRenderer_collectGarbage(renderer, false);
         double gcMs = N3DSProf_ms(svcGetSystemTick() - gcStartTick);
         u64 fsFlushStartTick = svcGetSystemTick();
         N3DSCachedFileSystem_flush(fileSystem, false);
+#ifdef N3DS_FRAME_PROFILER
+        N3DSZone_exit(&afterFrameZone);
+#endif
         double fsFlushMs = N3DSProf_ms(svcGetSystemTick() - fsFlushStartTick);
         u64 frameEndTick = svcGetSystemTick();
         double drawMs = N3DSProf_ms(frameEndTick - drawStartTick);
@@ -872,6 +977,18 @@ int main(int argc, char** argv) {
         };
         N3DSDebugMonitor_tickFrame(&debugMonitor, frameTimes);
         if (frameTimes[N3DS_FT_FRAME] > statsMaxFrameMs) statsMaxFrameMs = frameTimes[N3DS_FT_FRAME];
+        // The room's first frame (loading) is left out of its averages.
+        if (!roomChanged) {
+            roomStats.frames++;
+            roomStats.stepMs += stepMs;
+            roomStats.waitMs += waitMs;
+            roomStats.drawMs += drawMs;
+            roomStats.frameMs += frameTimes[N3DS_FT_FRAME];
+            roomStats.gpuMs += gpuMs;
+            roomStats.flushes += (double) gN3DSProfFlushes;
+            roomStats.instances += (double) arrlen(runner->instances);
+            if (frameTimes[N3DS_FT_FRAME] > roomStats.worstMs) roomStats.worstMs = frameTimes[N3DS_FT_FRAME];
+        }
         // A frame over 25 ms (under 40 fps) is a hitch or a slowdown: say where it went (at most twice a second, so a
         // long stall doesn't turn into SD writes of its own).
         u64 frameEndMs = osGetTime();

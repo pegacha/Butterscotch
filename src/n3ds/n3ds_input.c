@@ -1,4 +1,5 @@
 #include "n3ds_input.h"
+#include "../random.h"
 #include "n3ds_gml.h"
 #include "n3ds_platform_config.h"
 
@@ -69,6 +70,9 @@ typedef struct {
 static N3DSHarnessCmd* gHarness = NULL;
 static N3DSHarnessAnchor* gAnchors = NULL;
 static int32_t gFrame = 0;
+// "seed <n>": a fixed random seed (randomize() then does nothing), so two runs of a harness draw the same.
+static bool gHarnessSeeded = false;
+static uint32_t gHarnessSeed = 0;
 static u32 gKeysHeldPrev = 0;
 static bool gExitRequested = false;
 static N3DSChordButton gChordStart, gChordSelect;
@@ -99,6 +103,12 @@ static void N3DSInput_loadHarness(void) {
         char cmd[32] = "", arg[32] = "";
         int frame = 0, length = 1;
         char room[48] = "";
+        unsigned seed = 0;
+        if (sscanf(line, "seed %u", &seed) == 1) {
+            gHarnessSeeded = true;
+            gHarnessSeed = seed;
+            continue;
+        }
         if (sscanf(line, "after_room %47s", room) == 1) {
             N3DSHarnessAnchor a = { .frame = -1 };
             snprintf(a.room, sizeof(a.room), "%s", room);
@@ -151,6 +161,11 @@ static void N3DSInput_loadHarness(void) {
 
 void N3DSInput_init(MAYBE_UNUSED Runner* runner) {
     N3DSInput_loadHarness();
+    if (gHarnessSeeded && runner != NULL) {
+        runner->vmContext->hasFixedSeed = true;
+        Random_setSeed(&runner->random, gHarnessSeed);
+        logInfo("Harness: random seed %lu\n", (unsigned long) gHarnessSeed);
+    }
 }
 
 static void N3DSInput_fillGamepad(GamepadSlot* slot, u32 held, const circlePosition* circle, const circlePosition* cstick) {

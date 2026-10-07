@@ -1,0 +1,58 @@
+# Large rooms: goto each, Samus placed near its centre, 400 frames each (per-room 'Room perf' lines in log.txt).
+after_room titleroom
+press 800 START 4
+press 900 START 4
+press 1000 A 4
+press 1100 A 4
+after_room rm_a0h01
+goto 300 rm_a0h02
+after_room rm_a0h02
+place 5 800 240
+screenshot 200
+goto 400 rm_a8h01
+after_room rm_a8h01
+place 5 4000 600
+screenshot 200
+goto 400 rm_a2h02
+after_room rm_a2h02
+place 5 1920 840
+screenshot 200
+goto 400 rm_a5h04
+after_room rm_a5h04
+place 5 1120 1080
+screenshot 200
+goto 400 rm_a3h04
+after_room rm_a3h04
+place 5 1440 840
+screenshot 200
+goto 400 rm_a7a08
+after_room rm_a7a08
+place 5 800 1200
+screenshot 200
+goto 400 rm_a1h05
+after_room rm_a1h05
+place 5 1600 600
+screenshot 200
+goto 400 rm_a0h07
+after_room rm_a0h07
+place 5 640 840
+screenshot 200
+goto 400 rm_a4h04
+after_room rm_a4h04
+place 5 320 1560
+screenshot 200
+goto 400 rm_a6b14
+after_room rm_a6b14
+place 5 960 360
+screenshot 200
+goto 400 rm_a6b13
+after_room rm_a6b13
+place 5 320 960
+screenshot 200
+goto 400 rm_a7c04
+after_room rm_a7c04
+place 5 1280 240
+screenshot 200
+goto 400 rm_a0h01
+after_room rm_a0h01
+exit 30

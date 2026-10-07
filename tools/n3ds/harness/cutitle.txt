@@ -1,0 +1,12 @@
+# 1.5.5 title flow probe: new game in slot A, Normal; screenshots along the way.
+after_room titleroom
+press 800 START 4
+press 900 START 4
+press 1000 A 4
+press 1100 A 4
+press 1200 A 4
+screenshot 1300
+screenshot 1700
+screenshot 2300
+screenshot 3000
+exit 3020

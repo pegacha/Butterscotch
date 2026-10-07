@@ -63,6 +63,11 @@ static inline bool Renderer_isFiniteFloat(float v) { return isfinite(v); }
 #define N3DS_PREWARM_BLOB_BYTES_NEW3DS (12u * 1024u * 1024u)
 #define N3DS_RESIDENT_ATLAS_VRAM_BUDGET_OLD3DS (2560u * 1024u)
 #define N3DS_RESIDENT_ATLAS_VRAM_BUDGET_NEW3DS (5120u * 1024u)
+// Atlas pages live in linear memory, not VRAM: past the budget above, a page still in use (drawn within the last
+// N3DS_ATLAS_IDLE_FRAMES) is kept as long as linear memory has this much left. Evicting in-use pages made a room
+// whose pages don't fit re-import ten of them every few frames (a 14 ms hitch each time).
+#define N3DS_ATLAS_LINEAR_RESERVE_BYTES (3u * 1024u * 1024u)
+#define N3DS_ATLAS_IDLE_FRAMES 60u
 #define N3DS_MAX_CACHED_T3X_BYTES_OLD3DS (16u * 1024u * 1024u)
 #define N3DS_MAX_CACHED_T3X_BYTES_NEW3DS (24u * 1024u * 1024u)
 #define N3DS_MAX_CACHED_DIRECT_T3X_BYTES_OLD3DS (4u * 1024u * 1024u)
@@ -1711,6 +1716,7 @@ static bool N3DSRenderer_loadIndexed8Page(N3DSRenderer* renderer, N3DSLoadedAtla
 }
 
 static bool N3DSRenderer_loadPage(N3DSRenderer* renderer, uint32_t pageIndex) {
+    N3DS_ZONE(N3DS_ZONE_PAGE_LOAD);
     if (pageIndex >= renderer->atlasPageCount) return false;
     N3DSLoadedAtlasPage* page = &renderer->atlasPages[pageIndex];
     if (page->ready) return true;
@@ -1769,7 +1775,9 @@ static bool N3DSRenderer_loadPage(N3DSRenderer* renderer, uint32_t pageIndex) {
     return true;
 }
 
-static bool N3DSRenderer_evictLRUPage(N3DSRenderer* renderer, uint32_t excludePageIndex) {
+// Evicts the least recently used page that hasn't been drawn for minIdleFrames (at least 1: never one in use this
+// frame).
+static bool N3DSRenderer_evictLRUPageIdle(N3DSRenderer* renderer, uint32_t excludePageIndex, uint32_t minIdleFrames) {
     uint32_t bestIndex = UINT32_MAX;
     uint32_t bestStamp = UINT32_MAX;
 
@@ -1778,7 +1786,7 @@ static bool N3DSRenderer_evictLRUPage(N3DSRenderer* renderer, uint32_t excludePa
         N3DSLoadedAtlasPage* page = &renderer->atlasPages[i];
         if (!page->ready) continue;
         if (page->pinned) continue;
-        if (page->lastUsedFrame == renderer->frameSequence) continue;
+        if (page->lastUsedFrame + minIdleFrames > renderer->frameSequence) continue;
         if (page->lastUsedStamp < bestStamp) {
             bestStamp = page->lastUsedStamp;
             bestIndex = (uint32_t) i;
@@ -1786,8 +1794,16 @@ static bool N3DSRenderer_evictLRUPage(N3DSRenderer* renderer, uint32_t excludePa
     }
 
     if (bestIndex == UINT32_MAX) return false;
+#ifdef N3DS_FRAME_PROFILER
+    logInfo("N3DS: page %lu evicted (frame %lu, last used frame %lu)\n", (unsigned long) bestIndex,
+        (unsigned long) renderer->frameSequence, (unsigned long) renderer->atlasPages[bestIndex].lastUsedFrame);
+#endif
     N3DSRenderer_unloadPage(renderer, bestIndex);
     return true;
+}
+
+static bool N3DSRenderer_evictLRUPage(N3DSRenderer* renderer, uint32_t excludePageIndex) {
+    return N3DSRenderer_evictLRUPageIdle(renderer, excludePageIndex, 1u);
 }
 
 static bool N3DSRenderer_ensurePageLoaded(N3DSRenderer* renderer, uint32_t pageIndex) {
@@ -1802,6 +1818,9 @@ static bool N3DSRenderer_ensurePageLoaded(N3DSRenderer* renderer, uint32_t pageI
 
     while (renderer->residentAtlasPageCount >= renderer->residentAtlasPageLimit ||
         renderer->residentAtlasVRAMBytes + pageBytes > renderer->residentAtlasVRAMLimitBytes) {
+        if (N3DSRenderer_evictLRUPageIdle(renderer, pageIndex, N3DS_ATLAS_IDLE_FRAMES)) continue;
+        if (renderer->residentAtlasPageCount < renderer->residentAtlasPageLimit &&
+            linearSpaceFree() > N3DS_ATLAS_LINEAR_RESERVE_BYTES + pageBytes) break;
         if (!N3DSRenderer_evictLRUPage(renderer, pageIndex)) break;
     }
 
@@ -1826,6 +1845,12 @@ static bool N3DSRenderer_ensurePageLoaded(N3DSRenderer* renderer, uint32_t pageI
     renderer->residentAtlasPageCount++;
     renderer->residentAtlasVRAMBytes += pageBytes;
     renderer->frameImportEvictions += evictionsForLoad;
+#ifdef N3DS_FRAME_PROFILER
+    logInfo("N3DS: page %lu imported (%lu KB, frame %lu); resident %lu/%lu pages, %lu/%lu KB\n",
+        (unsigned long) pageIndex, (unsigned long) (pageBytes / 1024u), (unsigned long) renderer->frameSequence,
+        (unsigned long) renderer->residentAtlasPageCount, (unsigned long) renderer->residentAtlasPageLimit,
+        (unsigned long) (renderer->residentAtlasVRAMBytes / 1024u), (unsigned long) (renderer->residentAtlasVRAMLimitBytes / 1024u));
+#endif
     return true;
 }
 
@@ -1985,6 +2010,7 @@ static bool N3DSRenderer_ensureDirectTextureBlobLoaded(N3DSRenderer* renderer, N
 }
 
 static bool N3DSRenderer_loadDirectTextureAsset(N3DSRenderer* renderer, N3DSDirectTextureAsset* asset, const char* relativePath) {
+    N3DS_ZONE(N3DS_ZONE_PAGE_LOAD);
     if (renderer == NULL || asset == NULL || relativePath == NULL) return false;
     if (asset->ready) {
         asset->lastUsedStamp = ++renderer->directAssetUseCounter;
@@ -2031,6 +2057,11 @@ static bool N3DSRenderer_loadDirectTextureAsset(N3DSRenderer* renderer, N3DSDire
     asset->lastUsedFrame = renderer->frameSequence;
     renderer->residentDirectAssetVRAMBytes += vramBytes;
     renderer->frameDirectAssetLoads++;
+#ifdef N3DS_FRAME_PROFILER
+    logInfo("N3DS: sheet %s imported (%lu KB, frame %lu); resident %lu/%lu KB\n", relativePath,
+        (unsigned long) (vramBytes / 1024u), (unsigned long) renderer->frameSequence,
+        (unsigned long) (renderer->residentDirectAssetVRAMBytes / 1024u), (unsigned long) (renderer->residentDirectAssetVRAMLimitBytes / 1024u));
+#endif
     return true;
 }
 
@@ -2098,6 +2129,7 @@ static void N3DSRenderer_setDefaultGPUState(N3DSRenderer* renderer) {
 
 static void N3DSRenderer_flushC2DQueue(N3DSRenderer* renderer) {
     if (renderer == NULL || renderer->pendingC2DDraws == 0) return;
+    N3DS_ZONE(N3DS_ZONE_GPU_FLUSH);
     gN3DSProfFlushes++;
     C2D_Flush();
     renderer->pendingC2DDraws = 0;
@@ -3796,6 +3828,7 @@ static bool N3DSRenderer_tryResolveSingleFragmentFontPage(N3DSRenderer* renderer
 }
 
 static void N3DSRenderer_drawSprite(Renderer* base, int32_t tpagIndex, float x, float y, float originX, float originY, float xscale, float yscale, float angleDeg, uint32_t color, float alpha) {
+    N3DS_ZONE(N3DS_ZONE_SPRITE);
     if (!Renderer_isFiniteFloat(x) || !Renderer_isFiniteFloat(y) ||
         !Renderer_isFiniteFloat(originX) || !Renderer_isFiniteFloat(originY) ||
         !Renderer_isFiniteFloat(xscale) || !Renderer_isFiniteFloat(yscale) ||
@@ -4257,7 +4290,17 @@ static void N3DSRenderer_getVisibleRoomRect(N3DSRenderer* renderer, float* left,
     *bottom = ly0 < ly1 ? ly1 : ly0;
 }
 
+static bool N3DSRenderer_visibleRoomRect(Renderer* base, float* left, float* top, float* right, float* bottom) {
+    if (base == NULL) return false;
+#ifdef N3DS_NO_TILE_CULL
+    return false;
+#endif
+    N3DSRenderer_getVisibleRoomRect((N3DSRenderer*) base, left, top, right, bottom);
+    return true;
+}
+
 static void N3DSRenderer_drawTile(Renderer* base, RoomTile* tile, float offsetX, float offsetY) {
+    N3DS_ZONE_COUNT_ONLY(N3DS_ZONE_TILE);
     if (base == NULL || tile == NULL) return;
     int32_t srcW = (int32_t) tile->width;
     int32_t srcH = (int32_t) tile->height;
@@ -4266,6 +4309,7 @@ static void N3DSRenderer_drawTile(Renderer* base, RoomTile* tile, float offsetX,
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     // The runner hands over every tile in the room (a big AM2R room has thousands); drop the off-screen ones before
     // any lookup. The visible rectangle is cached against the mapping it came from.
+#ifndef N3DS_NO_TILE_CULL
     {
         float targetW = 0.0f, targetH = 0.0f;
         N3DSRenderer_getActiveTargetSize(renderer, &targetW, &targetH);
@@ -4288,6 +4332,7 @@ static void N3DSRenderer_drawTile(Renderer* base, RoomTile* tile, float offsetX,
             return;
         }
     }
+#endif
     uint32_t bgr = tile->color & 0x00FFFFFFu;
     uint8_t alphaByte = (uint8_t) ((tile->color >> 24) & 0xFFu);
     float alpha = (alphaByte == 0) ? 1.0f : (float) alphaByte / 255.0f;
@@ -4345,6 +4390,7 @@ static void N3DSRenderer_drawTile(Renderer* base, RoomTile* tile, float offsetX,
 }
 
 static void N3DSRenderer_drawTiled(Renderer* base, int32_t tpagIndex, float originX, float originY, float x, float y, float xscale, float yscale, bool tileX, bool tileY, float roomW, float roomH, uint32_t color, float alpha) {
+    N3DS_ZONE(N3DS_ZONE_TILED);
     if (!Renderer_isFiniteFloat(originX) || !Renderer_isFiniteFloat(originY) ||
         !Renderer_isFiniteFloat(x) || !Renderer_isFiniteFloat(y) ||
         !Renderer_isFiniteFloat(xscale) || !Renderer_isFiniteFloat(yscale) ||
@@ -4515,6 +4561,7 @@ static void N3DSRenderer_drawTiled(Renderer* base, int32_t tpagIndex, float orig
 }
 
 static void N3DSRenderer_drawTiledPart(Renderer* base, int32_t tpagIndex, int32_t srcX, int32_t srcY, int32_t srcW, int32_t srcH, float dstX, float dstY, float dstW, float dstH, uint32_t color, float alpha) {
+    N3DS_ZONE(N3DS_ZONE_TILED);
     if (srcW <= 0 || srcH <= 0 || dstW <= 0.0f || dstH <= 0.0f) return;
     if (!Renderer_isFiniteFloat(dstX) || !Renderer_isFiniteFloat(dstY) ||
         !Renderer_isFiniteFloat(dstW) || !Renderer_isFiniteFloat(dstH) ||
@@ -4574,6 +4621,7 @@ static void N3DSRenderer_drawTiledPart(Renderer* base, int32_t tpagIndex, int32_
 }
 
 static void N3DSRenderer_drawSpritePos(Renderer* base, int32_t tpagIndex, float x1, float y1, float x2, float y2, float x3, float y3, float x4, float y4, float alpha) {
+    N3DS_ZONE(N3DS_ZONE_SPRITE_POS);
     if (!Renderer_isFiniteFloat(x1) || !Renderer_isFiniteFloat(y1) ||
         !Renderer_isFiniteFloat(x2) || !Renderer_isFiniteFloat(y2) ||
         !Renderer_isFiniteFloat(x3) || !Renderer_isFiniteFloat(y3) ||
@@ -4609,6 +4657,7 @@ static void N3DSRenderer_drawSpritePos(Renderer* base, int32_t tpagIndex, float 
 }
 
 static void N3DSRenderer_drawRectangle(Renderer* base, float x1, float y1, float x2, float y2, uint32_t color, float alpha, bool outline) {
+    N3DS_ZONE(N3DS_ZONE_SHAPES);
     if (!Renderer_isFiniteFloat(x1) || !Renderer_isFiniteFloat(y1) ||
         !Renderer_isFiniteFloat(x2) || !Renderer_isFiniteFloat(y2) ||
         !Renderer_isFiniteFloat(alpha)) {
@@ -4639,6 +4688,7 @@ static void N3DSRenderer_drawRectangle(Renderer* base, float x1, float y1, float
 }
 
 static void N3DSRenderer_drawLine(Renderer* base, float x1, float y1, float x2, float y2, float width, uint32_t color, float alpha) {
+    N3DS_ZONE(N3DS_ZONE_SHAPES);
     if (!Renderer_isFiniteFloat(x1) || !Renderer_isFiniteFloat(y1) ||
         !Renderer_isFiniteFloat(x2) || !Renderer_isFiniteFloat(y2) ||
         !Renderer_isFiniteFloat(width) || !Renderer_isFiniteFloat(alpha)) {
@@ -4681,6 +4731,7 @@ static void N3DSRenderer_drawLine(Renderer* base, float x1, float y1, float x2, 
 }
 
 static void N3DSRenderer_drawTriangle(Renderer* base, float x1, float y1, float x2, float y2, float x3, float y3, uint32_t color1, uint32_t color2, uint32_t color3, float alpha, bool outline) {
+    N3DS_ZONE(N3DS_ZONE_SHAPES);
     if (!Renderer_isFiniteFloat(x1) || !Renderer_isFiniteFloat(y1) ||
         !Renderer_isFiniteFloat(x2) || !Renderer_isFiniteFloat(y2) ||
         !Renderer_isFiniteFloat(x3) || !Renderer_isFiniteFloat(y3)) {
@@ -4744,6 +4795,7 @@ static void N3DSRenderer_drawTriangle(Renderer* base, float x1, float y1, float 
 }
 
 static void N3DSRenderer_drawLineColor(Renderer* base, float x1, float y1, float x2, float y2, float width, uint32_t color1, uint32_t color2, float alpha) {
+    N3DS_ZONE(N3DS_ZONE_SHAPES);
     if (!Renderer_isFiniteFloat(x1) || !Renderer_isFiniteFloat(y1) ||
         !Renderer_isFiniteFloat(x2) || !Renderer_isFiniteFloat(y2) ||
         !Renderer_isFiniteFloat(width) || !Renderer_isFiniteFloat(alpha)) {
@@ -4974,14 +5026,17 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
 }
 
 static void N3DSRenderer_drawText(Renderer* base, const char* text, float x, float y, float xscale, float yscale, float angleDeg, float lineSeparation) {
+    N3DS_ZONE(N3DS_ZONE_TEXT);
     N3DSRenderer_drawTextCommon(base, text, x, y, xscale, yscale, angleDeg, false, 0, 0, 0, 0, base->drawAlpha, lineSeparation);
 }
 
 static void N3DSRenderer_drawTextColor(Renderer* base, const char* text, float x, float y, float xscale, float yscale, float angleDeg, int32_t c1, int32_t c2, int32_t c3, int32_t c4, float alpha, float lineSeparation) {
+    N3DS_ZONE(N3DS_ZONE_TEXT);
     N3DSRenderer_drawTextCommon(base, text, x, y, xscale, yscale, angleDeg, true, c1, c2, c3, c4, alpha, lineSeparation);
 }
 
 static void N3DSRenderer_drawTextUI(MAYBE_UNUSED Renderer* base, const char* text, float x, float y, MAYBE_UNUSED float xscale, MAYBE_UNUSED float yscale, MAYBE_UNUSED float angleDeg, MAYBE_UNUSED int32_t c1, MAYBE_UNUSED int32_t c2, MAYBE_UNUSED int32_t c3, MAYBE_UNUSED int32_t c4, MAYBE_UNUSED float alpha, MAYBE_UNUSED float lineSeparation) {
+    N3DS_ZONE(N3DS_ZONE_TEXT);
     N3DS_UNIMPL("drawTextUI", "len=%d at=%d,%d", (int) strlen(text), (int) x, (int) y);
 }
 
@@ -5005,6 +5060,7 @@ static void N3DSRenderer_fillTargetOpaque(N3DSRenderer* renderer, u32 rgba) {
 }
 
 static void N3DSRenderer_clearScreen(Renderer* base, uint32_t color, float alpha) {
+    N3DS_ZONE(N3DS_ZONE_TARGET);
     N3DSRenderer_fillTargetOpaque((N3DSRenderer*) base, N3DSRenderer_makeColor(color, alpha));
 }
 
@@ -5189,6 +5245,7 @@ static bool N3DSRenderer_allocSurfaceTexture(N3DSRenderer* renderer, N3DSSurface
 }
 
 static int32_t N3DSRenderer_createSurface(Renderer* base, int32_t width, int32_t height) {
+    N3DS_ZONE(N3DS_ZONE_TARGET);
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     // A new id each time, as the desktop renderer: games free surface ids they no longer own (AM2R's oControl frees
     // its stale screen_surface id every frame), and a reused id made that free another surface (the HUD's, Samus's),
@@ -5213,6 +5270,9 @@ static int32_t N3DSRenderer_createSurface(Renderer* base, int32_t width, int32_t
     if (!N3DSRenderer_allocSurfaceTexture(renderer, surface, width, height)) return -1;
     surface->exists = true;
     static uint32_t createLogs = 0;
+#ifdef N3DS_FRAME_PROFILER
+    createLogs = 0;
+#endif
     if (createLogs++ < 16u) logInfo("N3DS: surface %d created %dx%d (%s)\n", (int) id, (int) width, (int) height, surface->inVRAM ? "vram" : "linear");
     return id;
 }
@@ -5232,6 +5292,7 @@ static float N3DSRenderer_getSurfaceHeight(Renderer* base, int32_t surfaceID) {
 }
 
 static void N3DSRenderer_surfaceResize(Renderer* base, int32_t surfaceID, int32_t width, int32_t height) {
+    N3DS_ZONE(N3DS_ZONE_TARGET);
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     N3DSSurface* surface = N3DSRenderer_getSurface(renderer, surfaceID);
     if (surface == NULL || (surface->width == width && surface->height == height)) return;
@@ -5244,6 +5305,7 @@ static void N3DSRenderer_surfaceResize(Renderer* base, int32_t surfaceID, int32_
 }
 
 static void N3DSRenderer_surfaceFree(Renderer* base, int32_t surfaceID) {
+    N3DS_ZONE(N3DS_ZONE_TARGET);
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     if (base->runner != NULL && surfaceID == base->runner->applicationSurfaceId) return;
     N3DSSurface* surface = N3DSRenderer_getSurface(renderer, surfaceID);
@@ -5254,6 +5316,7 @@ static void N3DSRenderer_surfaceFree(Renderer* base, int32_t surfaceID) {
 }
 
 static int32_t N3DSRenderer_ensureApplicationSurface(Renderer* base, int32_t width, int32_t height) {
+    N3DS_ZONE(N3DS_ZONE_TARGET);
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     int32_t id = base->runner->applicationSurfaceId;
     if (N3DSRenderer_getSurface(renderer, id) == NULL) {
@@ -5331,6 +5394,7 @@ static void N3DSRenderer_updateMapping(N3DSRenderer* renderer) {
 }
 
 static void N3DSRenderer_applyProjection(Renderer* base, const Matrix4f* viewMatrix, const Matrix4f* projectionMatrix) {
+    N3DS_ZONE(N3DS_ZONE_VIEW_SETUP);
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     N3DSRenderer_flushC2DQueue(renderer);
     Renderer_applyProjection(base, viewMatrix, projectionMatrix);
@@ -5338,6 +5402,7 @@ static void N3DSRenderer_applyProjection(Renderer* base, const Matrix4f* viewMat
 }
 
 static void N3DSRenderer_setMatrix(Renderer* base, int32_t matrixType, Matrix4f matrix) {
+    N3DS_ZONE(N3DS_ZONE_VIEW_SETUP);
     if (matrixType < 0 || matrixType >= MATRICES_MAX) return;
     base->gmlMatrices[matrixType] = matrix;
     if (matrixType == MATRIX_WORLD || matrixType == MATRIX_VIEW || matrixType == MATRIX_PROJECTION) {
@@ -5611,6 +5676,7 @@ static void N3DSRenderer_endFrameEnd(Renderer* base) {
 }
 
 static void N3DSRenderer_beginView(Renderer* base, MAYBE_UNUSED int32_t viewX, MAYBE_UNUSED int32_t viewY, MAYBE_UNUSED int32_t viewW, MAYBE_UNUSED int32_t viewH, int32_t portX, int32_t portY, int32_t portW, int32_t portH, float viewAngle) {
+    N3DS_ZONE(N3DS_ZONE_VIEW_SETUP);
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     Runner* runner = base->runner;
     N3DSRenderer_bindTarget(renderer, Runner_surfaceGetTarget(runner), false);
@@ -5633,6 +5699,7 @@ static void N3DSRenderer_endView(Renderer* base) {
 }
 
 static void N3DSRenderer_beginGUI(Renderer* base, int32_t guiW, int32_t guiH, int32_t portX, int32_t portY, int32_t portW, int32_t portH, int32_t targetSurfaceId) {
+    N3DS_ZONE(N3DS_ZONE_VIEW_SETUP);
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     if (guiW <= 0) guiW = portW;
     if (guiH <= 0) guiH = portH;
@@ -5650,6 +5717,7 @@ static void N3DSRenderer_beginGUI(Renderer* base, int32_t guiW, int32_t guiH, in
 }
 
 static void N3DSRenderer_setGuiProjection(Renderer* base, int32_t guiW, int32_t guiH, MAYBE_UNUSED int32_t portW, MAYBE_UNUSED int32_t portH, MAYBE_UNUSED bool renderingToUserSurface) {
+    N3DS_ZONE(N3DS_ZONE_VIEW_SETUP);
     N3DSRenderer_flushC2DQueue((N3DSRenderer*) base);
     N3DSRenderer_applyGuiCamera(base, guiW, guiH);
 }
@@ -5659,6 +5727,7 @@ static void N3DSRenderer_endGUI(Renderer* base) {
 }
 
 static bool N3DSRenderer_setRenderTarget(Renderer* base, int32_t surfaceID, bool implicitApplicationSurface) {
+    N3DS_ZONE(N3DS_ZONE_TARGET);
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     if (surfaceID != RENDER_TARGET_HOST_FRAMEBUFFER && N3DSRenderer_getSurface(renderer, surfaceID) == NULL) return false;
     N3DSRenderer_bindTarget(renderer, surfaceID, true);
@@ -5671,7 +5740,9 @@ static bool N3DSRenderer_setRenderTarget(Renderer* base, int32_t surfaceID, bool
         N3DSRenderer_applyProjection(base, &view, &projection);
         return true;
     }
-    // surface_set_target: the surface's own pixel space, 0..w x 0..h.
+    // surface_set_target: the surface's own pixel space, 0..w x 0..h, over the whole surface (the viewport left from
+    // the game's view squeezed a surface wider than it, e.g. AM2R 1.5's 426-wide widescreen picture, into 320 columns).
+    N3DSRenderer_setViewport(renderer, 0.0f, 0.0f, renderer->targetW, renderer->targetH);
     Matrix4f projection;
     Matrix4f_identity(&projection);
     Matrix4f_ortho(&projection, 0.0f, renderer->targetW, renderer->targetH, 0.0f, -32000.0f, 32000.0f);
@@ -5710,6 +5781,7 @@ static void N3DSRenderer_drawSurfaceRegion(Renderer* base, N3DSSurface* surface,
 }
 
 static void N3DSRenderer_drawSurface(Renderer* base, int32_t surfaceID, int32_t srcLeft, int32_t srcTop, int32_t srcWidth, int32_t srcHeight, float x, float y, float xscale, float yscale, float angleDeg, uint32_t color, float alpha) {
+    N3DS_ZONE(N3DS_ZONE_SURFACE_DRAW);
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     N3DSSurface* surface = N3DSRenderer_getSurface(renderer, surfaceID);
 #ifdef N3DS_DIAG_PATTERN
@@ -5728,6 +5800,7 @@ static void N3DSRenderer_drawSurface(Renderer* base, int32_t surfaceID, int32_t 
 }
 
 static void N3DSRenderer_drawSurfaceColor(Renderer* base, int32_t surfaceID, int32_t srcLeft, int32_t srcTop, int32_t srcWidth, int32_t srcHeight, float x, float y, float xscale, float yscale, float angleDeg, uint32_t color1, uint32_t color2, uint32_t color3, uint32_t color4, float alpha) {
+    N3DS_ZONE(N3DS_ZONE_SURFACE_DRAW);
     if (color1 == color2 && color2 == color3 && color3 == color4) {
         N3DSRenderer_drawSurface(base, surfaceID, srcLeft, srcTop, srcWidth, srcHeight, x, y, xscale, yscale, angleDeg, color1, alpha);
         return;
@@ -5736,11 +5809,13 @@ static void N3DSRenderer_drawSurfaceColor(Renderer* base, int32_t surfaceID, int
 }
 
 static void N3DSRenderer_drawSurfaceTiled(MAYBE_UNUSED Renderer* base, int32_t surfaceID, MAYBE_UNUSED float x, MAYBE_UNUSED float y, MAYBE_UNUSED float xscale, MAYBE_UNUSED float yscale, MAYBE_UNUSED float roomW, MAYBE_UNUSED float roomH, MAYBE_UNUSED uint32_t color, MAYBE_UNUSED float alpha) {
+    N3DS_ZONE(N3DS_ZONE_TILED);
     N3DS_UNIMPL("drawSurfaceTiled", "surface=%d", (int) surfaceID);
 }
 
 // surface_copy / surface_copy_part: draw the source region into the destination with blending off.
 static void N3DSRenderer_surfaceCopy(Renderer* base, int32_t destSurfaceID, int32_t destX, int32_t destY, int32_t srcSurfaceID, int32_t srcX, int32_t srcY, int32_t srcW, int32_t srcH, bool part) {
+    N3DS_ZONE(N3DS_ZONE_TARGET);
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     N3DSSurface* src = N3DSRenderer_getSurface(renderer, srcSurfaceID);
     N3DSSurface* dst = N3DSRenderer_getSurface(renderer, destSurfaceID);
@@ -5822,6 +5897,7 @@ static void N3DSRenderer_deleteSprite(Renderer* base, int32_t spriteIndex) {
 // ===[ GPU state ]===
 
 static void N3DSRenderer_gpuSetBlendMode(Renderer* base, int32_t mode) {
+    N3DS_ZONE(N3DS_ZONE_STATE);
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     N3DSRenderer_flushC2DQueue(renderer);
     renderer->blendEnabled = true;
@@ -5847,6 +5923,7 @@ static void N3DSRenderer_gpuSetBlendMode(Renderer* base, int32_t mode) {
 }
 
 static void N3DSRenderer_gpuSetBlendModeExt(Renderer* base, int32_t sfactor, int32_t dfactor, int32_t sfactorAlpha, int32_t dfactorAlpha) {
+    N3DS_ZONE(N3DS_ZONE_STATE);
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     N3DSRenderer_flushC2DQueue(renderer);
     renderer->blendEnabled = true;
@@ -5869,6 +5946,7 @@ static int32_t N3DSRenderer_gpuGetBlendMode(Renderer* base) {
 }
 
 static void N3DSRenderer_gpuSetBlendEnable(Renderer* base, bool enable) {
+    N3DS_ZONE(N3DS_ZONE_STATE);
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     N3DSRenderer_flushC2DQueue(renderer);
     renderer->blendEnabled = enable;
@@ -5884,6 +5962,7 @@ static void N3DSRenderer_gpuSetTexFilter(Renderer* base, bool enable) {
 }
 
 static void N3DSRenderer_gpuSetAlphaTestEnable(Renderer* base, bool enable) {
+    N3DS_ZONE(N3DS_ZONE_STATE);
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     N3DSRenderer_flushC2DQueue(renderer);
     renderer->alphaTestEnabled = enable;
@@ -5895,6 +5974,7 @@ static bool N3DSRenderer_gpuGetAlphaTestEnable(Renderer* base) {
 }
 
 static void N3DSRenderer_gpuSetAlphaTestRef(Renderer* base, uint8_t ref) {
+    N3DS_ZONE(N3DS_ZONE_STATE);
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     N3DSRenderer_flushC2DQueue(renderer);
     renderer->alphaTestRef = ref;
@@ -5938,14 +6018,17 @@ static void N3DSRenderer_drawSpritePartColor(Renderer* base, int32_t tpagIndex, 
 // The Renderer interface takes float source rectangles (upstream a13f932); the 3DS drawing works on whole texels,
 // as the interface did before: truncate like the old RValue_toInt32 conversion.
 static void N3DSRenderer_drawSpritePartF(Renderer* base, int32_t tpagIndex, float srcOffX, float srcOffY, float srcW, float srcH, float x, float y, float xscale, float yscale, float angleDeg, float pivotX, float pivotY, uint32_t color, float alpha) {
+    N3DS_ZONE(N3DS_ZONE_SPRITE_PART);
     N3DSRenderer_drawSpritePart(base, tpagIndex, (int32_t) srcOffX, (int32_t) srcOffY, (int32_t) srcW, (int32_t) srcH, x, y, xscale, yscale, angleDeg, pivotX, pivotY, color, alpha);
 }
 
 static void N3DSRenderer_drawSpritePartColorF(Renderer* base, int32_t tpagIndex, float srcOffX, float srcOffY, float srcW, float srcH, float x, float y, float xscale, float yscale, float angleDeg, float pivotX, float pivotY, uint32_t color1, uint32_t color2, uint32_t color3, uint32_t color4, float alpha) {
+    N3DS_ZONE(N3DS_ZONE_SPRITE_PART);
     N3DSRenderer_drawSpritePartColor(base, tpagIndex, (int32_t) srcOffX, (int32_t) srcOffY, (int32_t) srcW, (int32_t) srcH, x, y, xscale, yscale, angleDeg, pivotX, pivotY, color1, color2, color3, color4, alpha);
 }
 
 static void N3DSRenderer_drawRectangleColor(Renderer* base, float x1, float y1, float x2, float y2, uint32_t color1, uint32_t color2, uint32_t color3, uint32_t color4, float alpha, bool outline) {
+    N3DS_ZONE(N3DS_ZONE_SHAPES);
     if (color1 == color2 && color2 == color3 && color3 == color4) {
         N3DSRenderer_drawRectangle(base, x1, y1, x2, y2, color1, alpha, outline);
         return;
@@ -5978,6 +6061,7 @@ static void N3DSRenderer_primitiveEnd(MAYBE_UNUSED Renderer* base) {}
 static void N3DSRenderer_drawVertex(MAYBE_UNUSED Renderer* base, MAYBE_UNUSED float x, MAYBE_UNUSED float y, MAYBE_UNUSED float z, MAYBE_UNUSED uint32_t color, MAYBE_UNUSED float alpha, MAYBE_UNUSED float u, MAYBE_UNUSED float v) {}
 
 static void N3DSRenderer_drawVertexBuffer(MAYBE_UNUSED Renderer* base, MAYBE_UNUSED VertexBuffer* buffer, int32_t primitive, int32_t texture, MAYBE_UNUSED int32_t offset, int32_t count) {
+    N3DS_ZONE(N3DS_ZONE_SHAPES);
     N3DS_UNIMPL("drawVertexBuffer", "prim=%d tex=%d count=%d", (int) primitive, (int) texture, (int) count);
 }
 
@@ -6027,6 +6111,7 @@ C3D_RenderTarget* N3DSRenderer_getTopTarget(Renderer* base) {
 }
 
 static RendererVtable N3DSRenderer_vtable = {
+    .getVisibleRoomRect = N3DSRenderer_visibleRoomRect,
     .init = N3DSRenderer_init,
     .destroy = N3DSRenderer_destroy,
     .beginFrame = N3DSRenderer_beginFrame,

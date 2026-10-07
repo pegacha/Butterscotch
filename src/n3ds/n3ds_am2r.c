@@ -1,4 +1,5 @@
 #include "n3ds_am2r.h"
+#include "n3ds_am2r_native.h"
 
 #include "n3ds_gml.h"
 #include "n3ds_platform_config.h"
@@ -31,7 +32,7 @@
 #define N3DS_AM2R_CHEATS_FILE N3DS_SD_DIR "cheats.ini"
 
 enum { CHEAT_MASTER, CHEAT_HEALTH, CHEAT_AMMO, CHEAT_BEAM, CHEAT_BOMBS, CHEAT_MISSILES, CHEAT_COUNT };
-enum { DISPLAY_ROW_SCREEN, DISPLAY_ROW_FRAMESKIP, DISPLAY_ROW_CHEATS, DISPLAY_ROW_EXIT, DISPLAY_ROW_COUNT };
+enum { DISPLAY_ROW_SCREEN, DISPLAY_ROW_FRAMESKIP, DISPLAY_ROW_NATIVE, DISPLAY_ROW_CHEATS, DISPLAY_ROW_EXIT, DISPLAY_ROW_COUNT };
 
 typedef enum { PAGE_NONE, PAGE_DISPLAY, PAGE_CHEATS } N3DSAm2rPage;
 
@@ -264,6 +265,7 @@ static void N3DSAm2r_loadCheats(void) {
         if (sscanf(line, "%31[^=]=%d", name, &value) != 2) continue;
         if (strcmp(name, "screen") == 0 && value >= 0 && value < N3DS_AM2R_SCREEN_MODES) N3DS_setScreenMode(kScreenModes[value]);
         if (strcmp(name, "frameskip") == 0) N3DS_setFrameskip(value != 0);
+        if (strcmp(name, "native") == 0) N3DSAm2rNative_setEnabled(value != 0);
         for (int i = 0; i < CHEAT_COUNT; i++) {
             if (strcmp(name, kCheatNames[i]) == 0) gAm2r.cheats[i] = value != 0;
         }
@@ -277,6 +279,7 @@ static void N3DSAm2r_saveCheats(void) {
     for (int i = 0; i < CHEAT_COUNT; i++) fprintf(f, "%s=%d\n", kCheatNames[i], gAm2r.cheats[i] ? 1 : 0);
     fprintf(f, "screen=%d\n", N3DSAm2r_screenModeSlot());
     fprintf(f, "frameskip=%d\n", N3DS_getFrameskip() ? 1 : 0);
+    fprintf(f, "native=%d\n", N3DSAm2rNative_enabled() ? 1 : 0);
     fclose(f);
 }
 
@@ -333,7 +336,10 @@ void N3DSAm2r_init(Runner* runner) {
             logInfo("AM2R: %s goes through the 3DS front end\n", name);
         }
     }
+    // Fast scripts default to on; cheats.ini can turn them off.
+    N3DSAm2rNative_setEnabled(true);
     N3DSAm2r_loadCheats();
+    N3DSAm2rNative_init(runner);
 }
 
 // ===[ Options ]===
@@ -390,8 +396,14 @@ static void N3DSAm2r_refreshPage(void) {
         if (screen != NULL) N3DSGml_setVarString(screen, "optext", kScreenModeNames[N3DSAm2r_screenModeSlot()]);
         Instance* frameskip = N3DSAm2r_pageRow(DISPLAY_ROW_FRAMESKIP);
         if (frameskip != NULL) N3DSGml_setVarString(frameskip, "optext", N3DS_getFrameskip() ? "ON" : "OFF");
+        Instance* native = N3DSAm2r_pageRow(DISPLAY_ROW_NATIVE);
+        if (native != NULL) {
+            N3DSGml_setVarString(native, "optext", N3DSAm2rNative_available() == 0 ? "N/A" : N3DSAm2rNative_enabled() ? "ON" : "OFF");
+        }
         const char* tip = selected == DISPLAY_ROW_SCREEN ? "Stretch fills the screen; 1x and 2x keep square pixels; Wide shows more of the room"
             : selected == DISPLAY_ROW_FRAMESKIP ? "A steady 30 fps at full game speed (draws every other frame)"
+            : selected == DISPLAY_ROW_NATIVE ? (N3DSAm2rNative_available() == 0 ? "Not available for this version of the game"
+                : "Busy game scripts run as built-in code: faster, same behaviour")
             : selected == DISPLAY_ROW_CHEATS ? "Unlimited health and ammo, stronger weapons"
             : "Back to the options";
         N3DSGml_setGlobalString("tiptext", tip);
@@ -415,9 +427,10 @@ static void N3DSAm2r_openPage(N3DSAm2rPage page, int32_t selected) {
     gAm2r.pageTitle = title != NULL ? (int32_t) title->instanceId : -1;
     int count = N3DSAm2r_pageRowCount(page);
     for (int i = 0; i < count; i++) {
-        bool lrRow = page == PAGE_DISPLAY ? (i == DISPLAY_ROW_SCREEN || i == DISPLAY_ROW_FRAMESKIP) : i < CHEAT_COUNT;
+        bool lrRow = page == PAGE_DISPLAY ? (i == DISPLAY_ROW_SCREEN || i == DISPLAY_ROW_FRAMESKIP || i == DISPLAY_ROW_NATIVE) : i < CHEAT_COUNT;
         const char* label = i == count - 1 ? "Exit"
-            : page == PAGE_DISPLAY ? (i == DISPLAY_ROW_SCREEN ? "Screen" : i == DISPLAY_ROW_FRAMESKIP ? "Frameskip" : "Cheats")
+            : page == PAGE_DISPLAY ? (i == DISPLAY_ROW_SCREEN ? "Screen" : i == DISPLAY_ROW_FRAMESKIP ? "Frameskip"
+                : i == DISPLAY_ROW_NATIVE ? "Fast scripts" : "Cheats")
             : kCheatLabels[i];
         Instance* row = N3DSGml_create(x, y + N3DS_AM2R_ROW_SEP * (float) (i + 1), lrRow ? gAm2r.objOptionLR : gAm2r.objPauseOption);
         gAm2r.pageRows[i] = row != NULL ? (int32_t) row->instanceId : -1;
@@ -490,6 +503,10 @@ static void N3DSAm2r_updatePage(void) {
     } else if (gAm2r.page == PAGE_DISPLAY && selected == DISPLAY_ROW_FRAMESKIP && (menu1 || left || right)) {
         N3DS_setFrameskip(!N3DS_getFrameskip());
         N3DSAm2r_sfx(gAm2r.sndMenuSel);
+    } else if (gAm2r.page == PAGE_DISPLAY && selected == DISPLAY_ROW_NATIVE && (menu1 || left || right) &&
+               N3DSAm2rNative_available() > 0) {
+        N3DSAm2rNative_setEnabled(!N3DSAm2rNative_enabled());
+        N3DSAm2r_sfx(gAm2r.sndMenuSel);
     } else if (gAm2r.page == PAGE_CHEATS && selected < CHEAT_COUNT && (menu1 || left || right)) {
         gAm2r.cheats[selected] = !gAm2r.cheats[selected];
         N3DSAm2r_sfx(gAm2r.sndMenuSel);
@@ -558,8 +575,37 @@ static void N3DSAm2r_dropWaterFilter(void) {
     N3DSGml_destroy(filter);
 }
 
+int32_t N3DSAm2r_gameWidth(void) {
+    if (!gAm2r.active) return 0;
+    Instance* control = N3DSGml_firstInstance(gAm2r.objControl);
+    double widescreen = 0.0, space = 0.0;
+    if (control == NULL || !N3DSGml_getVar(control, "widescreen", &widescreen) || widescreen < 0.5) return 0;
+    if (!N3DSGml_getVar(control, "widescreen_space", &space) || space <= 0.0) return 0;
+    return 320 + (int32_t) space;
+}
+
+// AM2R 1.5 creates its widescreen surface once, from the widescreen view's width, on its first frame, before the
+// widescreen width is set: 320 wide, so only 320 of the 426 columns ever showed. On a PC the surface is lost and made
+// again (window and display changes at startup); here it would never be. A wrong-sized one is freed for the game to
+// make again.
+static void N3DSAm2r_checkWidescreenSurface(void) {
+    Instance* control = N3DSGml_firstInstance(gAm2r.objControl);
+    double widescreen = 0.0, space = 0.0, surface = -1.0;
+    if (control == NULL || !N3DSGml_getVar(control, "widescreen", &widescreen) || widescreen < 0.5) return;
+    if (!N3DSGml_getVar(control, "widescreen_space", &space) || !N3DSGml_getVar(control, "widescreen_surface", &surface) ||
+        surface < 0.0) return;
+    Renderer* renderer = gAm2r.runner->renderer;
+    int32_t id = (int32_t) surface;
+    if (renderer == NULL || !renderer->vtable->surfaceExists(renderer, id)) return;
+    float width = Renderer_getSurfaceWidth(renderer, id);
+    if ((int32_t) width == 320 + (int32_t) space) return;
+    logInfo("AM2R: widescreen surface %d is %.0f wide, not %d: made again\n", (int) id, (double) width, 320 + (int) space);
+    renderer->vtable->surfaceFree(renderer, id);
+}
+
 void N3DSAm2r_update(void) {
     if (!gAm2r.active) return;
+    N3DSAm2r_checkWidescreenSurface();
     N3DSAm2r_dropWaterFilter();
     N3DSAm2r_hideKeyboardRow();
     if (gAm2r.page != PAGE_NONE) {

@@ -1610,34 +1610,28 @@ static void copyRoomViewToRuntimeView(RoomView* roomView, RuntimeView* runtimeVi
     runtimeView->portHeight = roomView->portHeight;
 }
 
-// Puts back the tiles the current snapshot's room had when it was entered (it's being left), unless it has become
-// persistent: GameMaker rebuilds a non-persistent room from its definition on every entry, so tiles deleted in one
-// visit (AM2R's broken blocks delete the tile drawn over them) are there again on the next.
-static void restoreRoomTiles(Runner* runner) {
-    int32_t roomIndex = runner->roomTilesSnapshotRoom;
-    if (roomIndex >= 0 && runner->dataWin->room.count > (uint32_t) roomIndex) {
-        Room* room = &runner->dataWin->room.rooms[roomIndex];
-        if (!room->persistent && room->payloadLoaded) {
-            room->tiles = (RoomTile*) safeRealloc(room->tiles, (runner->roomTilesSnapshotCount > 0 ? runner->roomTilesSnapshotCount : 1) * sizeof(RoomTile));
-            if (runner->roomTilesSnapshotCount > 0) memcpy(room->tiles, runner->roomTilesSnapshot, runner->roomTilesSnapshotCount * sizeof(RoomTile));
-            room->tileCount = runner->roomTilesSnapshotCount;
+// GameMaker rebuilds a non-persistent room from its definition on every entry, but the room's tile list is changed in
+// place (tile_delete / tile_add: AM2R's broken blocks delete the tile drawn over them). Each room's tiles as first
+// loaded are kept and put back whenever the room is entered fresh, i.e. not restored from a persistent visit. Keyed on
+// the entry, not the exit: AM2R makes the room persistent for its pause screen and clears that at the next room
+// start, so a room left while persistent is still rebuilt the next time it's entered fresh (a block bombed before a
+// pause came back invisible: its object recreated, its tile gone).
+static void resetRoomTiles(Runner* runner, int32_t roomIndex, Room* room, bool restoringPersistent) {
+    if (runner->pristineRoomTiles == nullptr) return;
+    RoomPristineTiles* pristine = &runner->pristineRoomTiles[roomIndex];
+    if (!pristine->taken) {
+        pristine->taken = true;
+        pristine->count = room->tileCount;
+        if (room->tileCount > 0) {
+            pristine->tiles = (RoomTile*) safeMalloc(room->tileCount * sizeof(RoomTile));
+            memcpy(pristine->tiles, room->tiles, room->tileCount * sizeof(RoomTile));
         }
+        return;
     }
-    free(runner->roomTilesSnapshot);
-    runner->roomTilesSnapshot = nullptr;
-    runner->roomTilesSnapshotCount = 0;
-    runner->roomTilesSnapshotRoom = -1;
-}
-
-static void snapshotRoomTiles(Runner* runner, int32_t roomIndex, Room* room) {
-    restoreRoomTiles(runner);
-    if (room->persistent) return;
-    runner->roomTilesSnapshotRoom = roomIndex;
-    runner->roomTilesSnapshotCount = room->tileCount;
-    if (room->tileCount > 0) {
-        runner->roomTilesSnapshot = (RoomTile*) safeMalloc(room->tileCount * sizeof(RoomTile));
-        memcpy(runner->roomTilesSnapshot, room->tiles, room->tileCount * sizeof(RoomTile));
-    }
+    if (restoringPersistent) return;
+    room->tiles = (RoomTile*) safeRealloc(room->tiles, (pristine->count > 0 ? pristine->count : 1) * sizeof(RoomTile));
+    if (pristine->count > 0) memcpy(room->tiles, pristine->tiles, pristine->count * sizeof(RoomTile));
+    room->tileCount = pristine->count;
 }
 
 static void initRoom(Runner* runner, int32_t roomIndex) {
@@ -1650,9 +1644,8 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     if (!room->payloadLoaded) {
         DataWin_loadRoomPayload(dataWin, roomIndex);
     }
-    snapshotRoomTiles(runner, roomIndex, room);
-
     SavedRoomState* savedState = &runner->savedRoomStates[roomIndex];
+    resetRoomTiles(runner, roomIndex, room, room->persistent && savedState->initialized);
 
     // Kept so carried persistent instances can be re-homed onto the new room's layer with the same name.
     Room* previousRoom = runner->currentRoom;
@@ -2276,7 +2269,6 @@ void Runner_reset(Runner* runner) {
     VM_reset(runner->vmContext);
 
     runner->pendingRoom = -1;
-    runner->roomTilesSnapshotRoom = -1;
     runner->asyncLoadMapId = -1;
     runner->eventDataMapId = -1;
     runner->asyncBufferNextRequestId = 1;
@@ -2296,6 +2288,9 @@ void Runner_reset(Runner* runner) {
     runner->currentRoomOrderPosition = -1;
     runner->nextInstanceId = runner->dataWin->gen8.lastObj + 1;
     runner->savedRoomStates = (SavedRoomState *)safeCalloc(runner->dataWin->room.count, sizeof(SavedRoomState));
+    if (runner->pristineRoomTiles == nullptr) {
+        runner->pristineRoomTiles = (RoomPristineTiles *)safeCalloc(runner->dataWin->room.count > 0 ? runner->dataWin->room.count : 1, sizeof(RoomPristineTiles));
+    }
     runner->nextLayerId = 1;
     runner->audioSystem->vtable->stopAll(runner->audioSystem);
 
@@ -2522,7 +2517,6 @@ Runner* Runner_create(DataWin* dataWin, VMContext* vm, Renderer* renderer, FileS
     validateRendererVtable(renderer);
 
     Runner* runner = (Runner *)safeCalloc(1, sizeof(Runner));
-    runner->roomTilesSnapshotRoom = -1;
     runner->dataWin = dataWin;
     runner->vmContext = vm;
     runner->renderer = renderer;
@@ -3974,7 +3968,6 @@ static void persistRoomState(Runner* runner, int32_t roomIndex) {
 void Runner_handlePendingRoomChange(Runner* runner) {
     // Handle game restart
     if (runner->pendingRoom == ROOM_RESTARTGAME) {
-        restoreRoomTiles(runner);
         // See you soon!
         // Free the currently-loaded non-eager room before reset so lazyLoadRooms stays steady-state.
         if (runner->dataWin->lazyLoadRooms && runner->currentRoom != nullptr && !runner->currentRoom->eagerlyLoaded) {
@@ -4008,8 +4001,6 @@ void Runner_handlePendingRoomChange(Runner* runner) {
         if (oldRoom->persistent) {
             persistRoomState(runner, oldRoomIndex);
         }
-        // A non-persistent room gets its original tiles back for its next visit (before a lazily loaded payload goes).
-        restoreRoomTiles(runner);
 
         // Free the outgoing room's payload under lazyLoadRooms, unless it's eagerly pinned or we're restarting the same room (initRoom would just re-load it).
         if (runner->dataWin->lazyLoadRooms && !oldRoom->eagerlyLoaded && newRoomIndex != oldRoomIndex) {
@@ -5080,6 +5071,12 @@ void Runner_free(Runner* runner) {
     if (runner == nullptr) return;
 
     cleanupState(runner);
+
+    if (runner->pristineRoomTiles != nullptr) {
+        repeat(runner->dataWin->room.count, i) free(runner->pristineRoomTiles[i].tiles);
+        free(runner->pristineRoomTiles);
+        runner->pristineRoomTiles = nullptr;
+    }
 
     {
         uint32_t objectCount = runner->dataWin->objt.count;

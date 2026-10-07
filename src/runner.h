@@ -148,6 +148,12 @@ typedef struct {
 } RuntimeView;
 
 typedef struct {
+    bool taken;
+    uint32_t count;
+    RoomTile* tiles;
+} RoomPristineTiles;
+
+typedef struct {
     bool allocated; // slot in use (default cameras: set when the room enables the view; user cameras: camera_create/destroy)
     float viewX;
     float viewY;
@@ -713,9 +719,7 @@ struct Runner {
     int32_t pendingRoom;  // -1 = none
     // The current room's tiles as it was entered (non-persistent rooms): tile_delete/tile_add/... change the room's
     // own tile list, and a room that isn't persistent starts over with its original tiles every time it's entered.
-    RoomTile* roomTilesSnapshot;
-    uint32_t roomTilesSnapshotCount;
-    int32_t roomTilesSnapshotRoom; // -1 = none
+    RoomPristineTiles* pristineRoomTiles; // per room: its tiles as first loaded (see resetRoomTiles)
     bool gameStartFired;
     int frameCount;
     uint32_t nextInstanceId;

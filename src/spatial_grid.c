@@ -17,6 +17,9 @@ SpatialGrid* SpatialGrid_create(uint32_t roomWidth, uint32_t roomHeight) {
 #endif
     grid->gridWidth = gridWidth;
     grid->gridHeight = gridHeight;
+    static uint32_t lastGeneration = 0;
+    if (++lastGeneration == 0) lastGeneration = 1;
+    grid->generation = lastGeneration;
 
     grid->grid = (Instance ***)safeCalloc(gridWidth * gridHeight, sizeof(Instance**));
 
@@ -36,6 +39,13 @@ void SpatialGrid_free(SpatialGrid* grid) {
 void SpatialGrid_removeInstance(SpatialGrid* grid, Instance* instance) {
     int32_t totalCells = (int32_t)grid->gridWidth * (int32_t)grid->gridHeight;
     bool removedAny = false;
+
+    // Not in this grid: never added, already removed, or added to an earlier room's grid (gone, with its cells).
+    // Without this every removal (each time a moving instance is re-filed) scanned the whole grid below.
+    if (instance->gridGeneration != grid->generation) {
+        arrsetlen(instance->collisionCells, 0);
+        return;
+    }
 
     // First remove from any cells named in this instance's cached tracking data.
     repeat(arrlen(instance->collisionCells), i) {
@@ -62,7 +72,8 @@ void SpatialGrid_removeInstance(SpatialGrid* grid, Instance* instance) {
     // Some room transitions and destructions can leave stale grid entries even when
     // collisionCells was cleared or never populated for the current grid. Fall back to
     // a full-grid scan so the instance pointer is not left dangling in the spatial hash.
-    repeat(totalCells, cellIndex) {
+    // (Only when its own cells didn't have it: the tracking was lost.)
+    if (!removedAny) repeat(totalCells, cellIndex) {
         Instance** cell = grid->grid[cellIndex];
         int32_t cellLen = (int32_t) arrlen(cell);
         for (int32_t j = 0; j < cellLen;) {
@@ -77,6 +88,7 @@ void SpatialGrid_removeInstance(SpatialGrid* grid, Instance* instance) {
         }
     }
 
+    instance->gridGeneration = 0;
     if (removedAny) {
         arrsetlen(instance->collisionCells, 0);
         instance->spatialGridDirty = false;
@@ -127,6 +139,7 @@ void SpatialGrid_syncGrid(Runner* runner, SpatialGrid* grid) {
                 arrput(instance->collisionCells, SpatialGrid_packGridCoordinates(gx, gy));
             }
         }
+        instance->gridGeneration = grid->generation;
 
         // And that's it for now!
     }

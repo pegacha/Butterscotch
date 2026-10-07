@@ -19,6 +19,8 @@ typedef struct {
     // The "end" of the grid is a stb_ds array
     int16_t gridWidth;
     int16_t gridHeight;
+    // Each grid (one per room) gets its own number, so an instance can tell whether its collisionCells are in this one.
+    uint32_t generation;
     int32_t* dirtyInstances;
     // Flat 2D grid of Instance* stb_ds arrays
     Instance*** grid;

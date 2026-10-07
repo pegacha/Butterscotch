@@ -9725,7 +9725,6 @@ static RValue builtin_instance_deactivate_object(VMContext* ctx, RValue* args, i
 static RValue builtin_instance_activate_region(VMContext* ctx, RValue* args, int32_t argCount) {
     REQUIRE_ARGC_AT_LEAST("instance_activate_region", 5, RValue_makeUndefined());
     Runner* runner = ctx->runner;
-    DataWin* dataWin = ctx->dataWin;
     GMLReal left = RValue_toReal(args[0]);
     GMLReal top = RValue_toReal(args[1]);
     GMLReal width = RValue_toReal(args[2]);
@@ -9735,27 +9734,8 @@ static RValue builtin_instance_activate_region(VMContext* ctx, RValue* args, int
     GMLReal right = left + width - 1;
     GMLReal bottom = top + height - 1;
 
-    // We don't use SpatialGrid here because inactive instances are NOT included in the SpatialGrid
-    int instances = arrlen(runner->instances);
-    repeat(instances, i) {
-        Instance* inst = runner->instances[i];
-        if (inst->active || inst->destroyed) continue;
-
-        bool outside = false;
-        Sprite* spr = Collision_getSprite(dataWin, inst);
-        if (spr != nullptr) {
-            InstanceBBox bbox = Collision_computeBBox(runner, inst);
-            if (bbox.right < left || bbox.left > right || bbox.bottom < top || bbox.top > bottom) {
-                outside = true;
-            }
-        } else {
-            if (inst->x > right || left > inst->x || inst->y > bottom || top > inst->y) {
-                outside = true;
-            }
-        }
-
-        if (outside != wantInside) Runner_setActiveState(ctx->runner, inst, true);
-    }
+    // Inactive instances aren't in the SpatialGrid; the runner keeps their bboxes in a packed list instead.
+    Runner_activateRegion(runner, left, top, right, bottom, wantInside);
     return RValue_makeUndefined();
 }
 
@@ -13412,6 +13392,44 @@ static RValue builtin_place_meeting(VMContext* ctx, RValue* args, int32_t argCou
 static inline GMLReal compatRoundCoord(GMLReal v) { return GMLReal_bankersRound(v); }
 
 // collision_line(x1, y1, x2, y2, obj, prec, notme)
+// Pushes the target's instances whose collision-grid cells meet the rectangle (each once, in grid order) onto
+// runner->instanceSnapshots, like Runner_pushInstancesForTarget does with all of them; pop with
+// Runner_popInstanceSnapshot. Instances without a collision box aren't in the grid, and every collision test treats
+// them as missing anyway. The caller still runs its exact test (and its active / notme checks) on each one.
+// A room's solids number in the hundreds; AM2R's movement scripts ask collision_line and friends about them many
+// times a frame, so scanning all of them each time cost milliseconds. The grid holds every object though, and cells
+// can fill up with others (a lava room's bubbles), so whichever of the two lists is shorter is walked.
+static int32_t pushGridCandidates(Runner* runner, GMLReal x1, GMLReal y1, GMLReal x2, GMLReal y2, int32_t target) {
+    if (target >= INSTANCE_ID_BASE || (0 > target && target != INSTANCE_ALL) || runner->spatialGrid == nullptr ||
+        (target >= 0 && (uint32_t) target >= runner->dataWin->objt.count))
+        return Runner_pushInstancesForTarget(runner, target);
+    int32_t base = (int32_t) arrlen(runner->instanceSnapshots);
+    SpatialGrid_syncGrid(runner, runner->spatialGrid);
+    SpatialGridQuery query = SpatialGrid_prepareQuery(runner, GMLReal_fmin(x1, x2), GMLReal_fmin(y1, y2), GMLReal_fmax(x1, x2), GMLReal_fmax(y1, y2), target);
+    int32_t listCount = target == INSTANCE_ALL ? (int32_t) arrlen(runner->instances)
+        : (int32_t) arrlen(runner->instancesByObject[target]);
+    int32_t gridCount = 0;
+    for (int32_t gx = query.range.minGridX; query.range.maxGridX >= gx && listCount >= gridCount; gx++) {
+        for (int32_t gy = query.range.minGridY; query.range.maxGridY >= gy; gy++)
+            gridCount += (int32_t) arrlen(runner->spatialGrid->grid[SpatialGrid_cellIndex(runner->spatialGrid, gx, gy)]);
+    }
+    if (gridCount > listCount) return Runner_pushInstancesForTarget(runner, target);
+    for (int32_t gx = query.range.minGridX; query.range.maxGridX >= gx; gx++) {
+        for (int32_t gy = query.range.minGridY; query.range.maxGridY >= gy; gy++) {
+            Instance** cell = runner->spatialGrid->grid[SpatialGrid_cellIndex(runner->spatialGrid, gx, gy)];
+            int32_t cellLen = (int32_t) arrlen(cell);
+            repeat(cellLen, ci) {
+                Instance* inst = cell[ci];
+                if (inst->lastCollisionQueryId == query.queryId) continue;
+                inst->lastCollisionQueryId = query.queryId;
+                if (!query.matchAll && !VM_isObjectOrDescendant(runner->dataWin, inst->objectIndex, target)) continue;
+                arrput(runner->instanceSnapshots, inst);
+            }
+        }
+    }
+    return base;
+}
+
 static RValue builtin_collision_line(VMContext* ctx, RValue* args, int32_t argCount) {
     REQUIRE_ARGC_AT_LEAST("collision_line", 7, RValue_makeReal((GMLReal) INSTANCE_NOONE));
 
@@ -13432,7 +13450,7 @@ static RValue builtin_collision_line(VMContext* ctx, RValue* args, int32_t argCo
     Instance* self = ctx->currentInstance;
 
     int32_t resultId = INSTANCE_NOONE;
-    int32_t snapBase = Runner_pushInstancesForTarget(runner, targetObjIndex);
+    int32_t snapBase = pushGridCandidates(runner, lx1, ly1, lx2, ly2, targetObjIndex);
     int32_t snapEnd  = (int32_t) arrlen(runner->instanceSnapshots);
     for (int32_t snapIdx = snapBase; snapEnd > snapIdx; snapIdx++) {
         Instance* inst = runner->instanceSnapshots[snapIdx];
@@ -13611,7 +13629,7 @@ static RValue builtin_collision_rectangle(VMContext* ctx, RValue* args, int32_t 
     Instance* self = ctx->currentInstance;
 
     int32_t resultId = INSTANCE_NOONE;
-    int32_t snapBase = Runner_pushInstancesForTarget(runner, targetObjIndex);
+    int32_t snapBase = pushGridCandidates(runner, x1, y1, x2, y2, targetObjIndex);
     int32_t snapEnd  = (int32_t) arrlen(runner->instanceSnapshots);
     for (int32_t snapIdx = snapBase; snapEnd > snapIdx; snapIdx++) {
         Instance* inst = runner->instanceSnapshots[snapIdx];
@@ -14236,7 +14254,7 @@ static RValue builtin_collision_point(VMContext* ctx, RValue* args, int32_t argC
     Instance* self = ctx->currentInstance;
 
     int32_t resultId = INSTANCE_NOONE;
-    int32_t snapBase = Runner_pushInstancesForTarget(runner, targetObjIndex);
+    int32_t snapBase = pushGridCandidates(runner, px, py, px, py, targetObjIndex);
     int32_t snapEnd  = (int32_t) arrlen(runner->instanceSnapshots);
     for (int32_t snapIdx = snapBase; snapEnd > snapIdx; snapIdx++) {
         Instance* inst = runner->instanceSnapshots[snapIdx];
@@ -14394,7 +14412,7 @@ static RValue builtin_instance_position(VMContext* ctx, RValue* args, int32_t ar
     }
 
     int32_t resultId = INSTANCE_NOONE;
-    int32_t snapBase = Runner_pushInstancesForTarget(runner, targetObjIndex);
+    int32_t snapBase = pushGridCandidates(runner, px, py, px, py, targetObjIndex);
     int32_t snapEnd  = (int32_t) arrlen(runner->instanceSnapshots);
     for (int32_t i = snapBase; snapEnd > i; i++) {
         Instance* inst = runner->instanceSnapshots[i];
@@ -15251,7 +15269,8 @@ static RValue builtin_tile_layer_depth(VMContext* ctx, RValue* args, MAYBE_UNUSE
         RoomTile* tile = &room->tiles[i];
         if (tile->tileDepth != depth) continue;
         tile->tileDepth = newdepth;
-        runner->drawableListSortDirty = true;
+        // Tiles are sorted (and bucketed for drawing) with the room's static drawables.
+        runner->drawableListStructureDirty = true;
     }
     return RValue_makeUndefined();
 }
@@ -15362,6 +15381,8 @@ static RValue builtin_tile_set_scale(VMContext* ctx, RValue* args, MAYBE_UNUSED 
     }
     tile->scaleX = (float) RValue_toReal(args[1]);
     tile->scaleY = (float) RValue_toReal(args[2]);
+    // Its extent changed: re-bucket the room's tiles for culling.
+    ctx->runner->drawableListStructureDirty = true;
     return RValue_makeUndefined();
 }
 

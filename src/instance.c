@@ -25,6 +25,7 @@ Instance* Instance_create(uint32_t instanceId, int32_t objectIndex, GMLReal x, G
     inst->xstart = (float) x;
     inst->ystart = (float) y;
     inst->maskIndex = -1;
+    inst->inactiveSlot = -1;
     inst->persistent = false;
     inst->solid = false;
     inst->active = true;

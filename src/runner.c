@@ -17,6 +17,9 @@
 #include "debug_overlay.h"
 #include "gettime.h"
 #include "stb_ds.h"
+#ifdef N3DS_FRAME_PROFILER
+#include "n3ds/n3ds_prof.h"
+#endif
 
 // ===[ Runtime Layer Teardown Helpers ]===
 void Runner_freeRuntimeLayer(RuntimeLayer* runtimeLayer) {
@@ -209,6 +212,14 @@ static void executeCode(Runner* runner, Instance* instance, int32_t codeId) {
 
     VMContext* vm = runner->vmContext;
 
+    if (runner->nativeEventCode != nullptr && runner->nativeEventCode[codeId] != nullptr) {
+        Instance* previous = (Instance*) vm->currentInstance;
+        setVMInstanceContext(vm, instance);
+        bool handled = runner->nativeEventCode[codeId](runner, instance);
+        restoreVMInstanceContext(vm, previous);
+        if (handled) return;
+    }
+
     // Save instance context
     Instance* savedInstance = (Instance*) vm->currentInstance;
 
@@ -226,10 +237,11 @@ static void executeCode(Runner* runner, Instance* instance, int32_t codeId) {
     int32_t savedStackTop = vm->stack.top;
 
     // Save stack values (VM_executeCode resets stack.top to 0, which would let
-    // the nested execution overwrite the caller's stack slot values)
+    // the nested execution overwrite the caller's stack slot values). A few fit on the C stack (no malloc per event).
+    RValue savedStackLocal[16];
     RValue* savedStackValues = nullptr;
     if (savedStackTop > 0) {
-        savedStackValues = (RValue *)safeMalloc((uint32_t) savedStackTop * sizeof(RValue));
+        savedStackValues = 16 >= savedStackTop ? savedStackLocal : (RValue *)safeMalloc((uint32_t) savedStackTop * sizeof(RValue));
         memcpy(savedStackValues, vm->stack.slots, (uint32_t) savedStackTop * sizeof(RValue));
     }
 
@@ -257,7 +269,7 @@ static void executeCode(Runner* runner, Instance* instance, int32_t codeId) {
     // Restore stack values
     if (savedStackTop > 0) {
         memcpy(vm->stack.slots, savedStackValues, (uint32_t) savedStackTop * sizeof(RValue));
-        free(savedStackValues);
+        if (savedStackValues != savedStackLocal) free(savedStackValues);
     }
 }
 
@@ -863,32 +875,212 @@ static void refreshDrawableDepths(Runner* runner, Drawable* drawables, int32_t c
     }
 }
 
-// Rebuilds runner->cachedDrawables when invalidated. Two-tier strategy:
-//   structureDirty - the SET of entries changed (instance/layer create or destroy, room change). Drop the cache and re-add every instance/tile/runtime-layer, then qsort.
-//   sortDirty only - the entries are the same but .depth values may have shifted. Refresh depths from the live sources and only qsort if the order actually broke.
+static void sortDrawables(Drawable* drawables, int32_t count) {
+    if (count > 1) qsort(drawables, count, sizeof(Drawable), compareDrawables);
+}
+
+// ===[ Tile runs ]===
+
+#define TILE_RUN_CELL_SIZE 128.0f
+#define TILE_RUN_MAX_CELLS 16384
+
+static void freeTileRuns(Runner* runner) {
+    repeat(arrlen(runner->tileRuns), i) {
+        TileRun* run = &runner->tileRuns[i];
+        free(run->cellStarts);
+        free(run->cellItems);
+        free(run->visibleBits);
+    }
+    arrsetlen(runner->tileRuns, 0);
+}
+
+static void tileExtent(const RoomTile* tile, float* x0, float* y0, float* x1, float* y1) {
+    float ax = (float) tile->x, bx = ax + (float) tile->width * tile->scaleX;
+    float ay = (float) tile->y, by = ay + (float) tile->height * tile->scaleY;
+    *x0 = ax < bx ? ax : bx;
+    *x1 = ax < bx ? bx : ax;
+    *y0 = ay < by ? ay : by;
+    *y1 = ay < by ? by : ay;
+}
+
+static int32_t tileRunCell(const TileRun* run, float x0, float y0) {
+    int32_t cx = (int32_t) ((x0 - run->originX) / run->cellSize);
+    int32_t cy = (int32_t) ((y0 - run->originY) / run->cellSize);
+    if (0 > cx) cx = 0;
+    if (cx >= run->columns) cx = run->columns - 1;
+    if (0 > cy) cy = 0;
+    if (cy >= run->rows) cy = run->rows - 1;
+    return cy * run->columns + cx;
+}
+
+static void buildTileRuns(Runner* runner, Room* room) {
+    freeTileRuns(runner);
+    Drawable* tiles = runner->cachedStaticDrawables;
+    int32_t total = (int32_t) arrlen(tiles);
+    int32_t start = 0;
+    while (total > start) {
+        int32_t end = start;
+        while (total > end && tiles[end].type == DRAWABLE_TILE && tiles[end].depth == tiles[start].depth) end++;
+        if (end == start) end = start + 1; // not a tile (can't happen in GMS1): its own run, never culled
+
+        TileRun run;
+        ZERO_STRUCT(run);
+        run.depth = tiles[start].depth;
+        run.start = start;
+        run.count = end - start;
+        float minX = INFINITY, minY = INFINITY, maxX = -INFINITY, maxY = -INFINITY;
+        bool finite = tiles[start].type == DRAWABLE_TILE;
+        for (int32_t k = start; finite && end > k; k++) {
+            float x0, y0, x1, y1;
+            tileExtent(&room->tiles[tiles[k].tileIndex], &x0, &y0, &x1, &y1);
+            if (!isfinite(x0) || !isfinite(y0) || !isfinite(x1) || !isfinite(y1)) { finite = false; break; }
+            if (minX > x0) minX = x0;
+            if (minY > y0) minY = y0;
+            if (x1 > maxX) maxX = x1;
+            if (y1 > maxY) maxY = y1;
+            if (x1 - x0 > run.maxW) run.maxW = x1 - x0;
+            if (y1 - y0 > run.maxH) run.maxH = y1 - y0;
+        }
+        if (finite) {
+            run.originX = minX;
+            run.originY = minY;
+            run.cellSize = TILE_RUN_CELL_SIZE;
+            for (;;) {
+                float columns = (maxX - minX) / run.cellSize + 1.0f;
+                float rows = (maxY - minY) / run.cellSize + 1.0f;
+                if ((float) TILE_RUN_MAX_CELLS >= columns * rows) {
+                    run.columns = (int32_t) columns;
+                    run.rows = (int32_t) rows;
+                    break;
+                }
+                run.cellSize *= 2.0f;
+            }
+            int32_t cells = run.columns * run.rows;
+            run.cellStarts = (int32_t*) safeCalloc((size_t) cells + 1, sizeof(int32_t));
+            run.cellItems = (int32_t*) safeMalloc((size_t) run.count * sizeof(int32_t));
+            run.visibleBits = (uint32_t*) safeCalloc(((size_t) run.count + 31) / 32, sizeof(uint32_t));
+            // Counting sort by cell; each cell keeps its tiles in draw order.
+            int32_t* cellOf = (int32_t*) safeMalloc((size_t) run.count * sizeof(int32_t));
+            repeat(run.count, k) {
+                float x0, y0, x1, y1;
+                tileExtent(&room->tiles[tiles[start + k].tileIndex], &x0, &y0, &x1, &y1);
+                cellOf[k] = tileRunCell(&run, x0, y0);
+                run.cellStarts[cellOf[k] + 1]++;
+            }
+            repeat(cells, c) run.cellStarts[c + 1] += run.cellStarts[c];
+            int32_t* fill = (int32_t*) safeMalloc((size_t) cells * sizeof(int32_t));
+            memcpy(fill, run.cellStarts, (size_t) cells * sizeof(int32_t));
+            repeat(run.count, k) run.cellItems[fill[cellOf[k]]++] = (int32_t) k;
+            free(fill);
+            free(cellOf);
+        }
+        arrput(runner->tileRuns, run);
+        start = end;
+    }
+}
+
+// Draws the tiles in view of the run that starts at cachedDrawables[pos] and returns how many drawables that run
+// covers, or 0 when it can't be culled here (the tiles then go one by one).
+static int32_t drawTileRunCulled(Runner* runner, Room* room, int32_t pos, float offsetX, float offsetY) {
+    Renderer* renderer = runner->renderer;
+    if (renderer->vtable->getVisibleRoomRect == nullptr) return 0;
+    Drawable* first = &runner->cachedDrawables[pos];
+
+    TileRun* run = nullptr;
+    int32_t lo = 0, hi = (int32_t) arrlen(runner->tileRuns) - 1;
+    while (hi >= lo) {
+        int32_t mid = (lo + hi) / 2;
+        int32_t depth = runner->tileRuns[mid].depth;
+        if (depth == first->depth) { run = &runner->tileRuns[mid]; break; }
+        if (depth > first->depth) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    if (run == nullptr || run->columns == 0) return 0;
+
+    // Only from the run's first tile, and only while the draw list holds the whole run there.
+    Drawable* fixed = runner->cachedStaticDrawables;
+    if (fixed[run->start].tileIndex != first->tileIndex) return 0;
+    if (pos + run->count > (int32_t) arrlen(runner->cachedDrawables)) return 0;
+    Drawable* last = &runner->cachedDrawables[pos + run->count - 1];
+    if (last->type != DRAWABLE_TILE || last->tileIndex != fixed[run->start + run->count - 1].tileIndex) return 0;
+
+    float left, top, right, bottom;
+    if (!renderer->vtable->getVisibleRoomRect(renderer, &left, &top, &right, &bottom)) return 0;
+#ifdef N3DS_FRAME_PROFILER
+    int zone = N3DSZone_enter(N3DS_ZONE_TILE);
+#endif
+    // Into the run's coordinates. A tile is filed by its top-left corner, so look one tile further up and left.
+    left -= offsetX + run->maxW + 1.0f;
+    top -= offsetY + run->maxH + 1.0f;
+    right -= offsetX - 1.0f;
+    bottom -= offsetY - 1.0f;
+    float fx0 = (left - run->originX) / run->cellSize, fx1 = (right - run->originX) / run->cellSize;
+    float fy0 = (top - run->originY) / run->cellSize, fy1 = (bottom - run->originY) / run->cellSize;
+    if (fx1 >= 0.0f && fy1 >= 0.0f && (float) run->columns > fx0 && (float) run->rows > fy0) {
+        int32_t cx0 = fx0 > 0.0f ? (int32_t) fx0 : 0;
+        int32_t cy0 = fy0 > 0.0f ? (int32_t) fy0 : 0;
+        int32_t cx1 = (float) run->columns > fx1 ? (int32_t) fx1 : run->columns - 1;
+        int32_t cy1 = (float) run->rows > fy1 ? (int32_t) fy1 : run->rows - 1;
+        for (int32_t cy = cy0; cy1 >= cy; cy++) {
+            for (int32_t cx = cx0; cx1 >= cx; cx++) {
+                int32_t c = cy * run->columns + cx;
+                for (int32_t it = run->cellStarts[c]; run->cellStarts[c + 1] > it; it++) {
+                    int32_t k = run->cellItems[it];
+                    run->visibleBits[k >> 5] |= 1u << (k & 31);
+                }
+            }
+        }
+        // In draw order.
+        int32_t words = (run->count + 31) / 32;
+        repeat(words, w) {
+            uint32_t bits = run->visibleBits[w];
+            if (bits == 0) continue;
+            run->visibleBits[w] = 0;
+            for (int32_t b = 0; bits != 0; b++, bits >>= 1) {
+                if ((bits & 1u) == 0) continue;
+                RoomTile* tile = &room->tiles[fixed[run->start + (int32_t) w * 32 + b].tileIndex];
+                Renderer_drawTile(renderer, tile, offsetX, offsetY);
+            }
+        }
+    }
+#ifdef N3DS_FRAME_PROFILER
+    N3DSZone_exit(&zone);
+#endif
+    return run->count;
+}
+
+// Rebuilds runner->cachedDrawables when invalidated. Three tiers:
+//   structureDirty - tiles or layers changed too (room change, tile/layer functions): rebuild the sorted static part
+//                    (tiles / runtime layers), then the instances.
+//   instancesDirty - an instance was created or freed: sort the instances (and particle systems) and merge them
+//                    with the static part, which is already sorted.
+//   sortDirty only - the entries are the same but .depth values may have shifted. Refresh depths from the live
+//                    sources; if the order broke, re-sort the instances as above.
 static void rebuildDrawableCacheIfDirty(Runner* runner) {
-    if (runner->drawableListStructureDirty) {
+    bool gms2 = DataWin_isVersionAtLeast(runner->dataWin, 2, 0, 0, 0);
+    if (runner->drawableListSortDirty && !runner->drawableListStructureDirty && !runner->drawableListInstancesDirty) {
+        int32_t count = (int32_t) arrlen(runner->cachedDrawables);
+        refreshDrawableDepths(runner, runner->cachedDrawables, count);
+        runner->drawableListSortDirty = false;
+        if (1 >= count || isDrawableArraySorted(runner->cachedDrawables, count)) return;
+        runner->drawableListInstancesDirty = true;
+    }
+    if (!runner->drawableListStructureDirty && !runner->drawableListInstancesDirty) return;
+
+    Room* room = runner->currentRoom;
+    if (room == nullptr) {
         arrsetlen(runner->cachedDrawables, 0);
-        Room* room = runner->currentRoom;
-        if (room == nullptr) {
-            runner->drawableListStructureDirty = false;
-            runner->drawableListSortDirty = false;
-            return;
-        }
+        arrsetlen(runner->cachedStaticDrawables, 0);
+        freeTileRuns(runner);
+        runner->drawableListStructureDirty = false;
+        runner->drawableListInstancesDirty = false;
+        runner->drawableListSortDirty = false;
+        return;
+    }
 
-        int32_t instanceCount = (int32_t) arrlen(runner->instances);
-        repeat(instanceCount, i) {
-            Instance* inst = runner->instances[i];
-            Drawable d;
-            ZERO_STRUCT(d);
-            d.type = DRAWABLE_INSTANCE;
-            d.depth = inst->depth;
-            d.instance = inst;
-            refreshDrawableLayerOrder(runner, &d);
-            arrput(runner->cachedDrawables, d);
-        }
-
-        if (!DataWin_isVersionAtLeast(runner->dataWin, 2, 0, 0, 0)) {
+    if (runner->drawableListStructureDirty) {
+        arrsetlen(runner->cachedStaticDrawables, 0);
+        if (!gms2) {
             repeat(room->tileCount, i) {
                 RoomTile* tile = &room->tiles[i];
                 Drawable d;
@@ -896,7 +1088,7 @@ static void rebuildDrawableCacheIfDirty(Runner* runner) {
                 d.type = DRAWABLE_TILE;
                 d.depth = tile->tileDepth;
                 d.tileIndex = (int32_t) i;
-                arrput(runner->cachedDrawables, d);
+                arrput(runner->cachedStaticDrawables, d);
             }
         } else {
             size_t runtimeLayersCount = arrlenu(runner->runtimeLayers);
@@ -908,8 +1100,32 @@ static void rebuildDrawableCacheIfDirty(Runner* runner) {
                 d.depth = runtimeLayer->depth;
                 d.runtimeLayerId = (int32_t) runtimeLayer->id;
                 refreshDrawableLayerOrder(runner, &d);
-                arrput(runner->cachedDrawables, d);
+                arrput(runner->cachedStaticDrawables, d);
             }
+        }
+        sortDrawables(runner->cachedStaticDrawables, (int32_t) arrlen(runner->cachedStaticDrawables));
+        if (!gms2) buildTileRuns(runner, room);
+        else freeTileRuns(runner);
+    } else if (gms2) {
+        // Runtime layers can change depth without a structure change.
+        int32_t staticCount = (int32_t) arrlen(runner->cachedStaticDrawables);
+        refreshDrawableDepths(runner, runner->cachedStaticDrawables, staticCount);
+        if (staticCount > 1 && !isDrawableArraySorted(runner->cachedStaticDrawables, staticCount))
+            sortDrawables(runner->cachedStaticDrawables, staticCount);
+    }
+
+    {
+        arrsetlen(runner->scratchDrawables, 0);
+        int32_t instanceCount = (int32_t) arrlen(runner->instances);
+        repeat(instanceCount, i) {
+            Instance* inst = runner->instances[i];
+            Drawable d;
+            ZERO_STRUCT(d);
+            d.type = DRAWABLE_INSTANCE;
+            d.depth = inst->depth;
+            d.instance = inst;
+            refreshDrawableLayerOrder(runner, &d);
+            arrput(runner->scratchDrawables, d);
         }
 
         // Particle systems are not room-scoped: a system created in one room keeps running until the
@@ -923,27 +1139,32 @@ static void rebuildDrawableCacheIfDirty(Runner* runner) {
             d.type = DRAWABLE_PARTICLE_SYSTEM;
             d.depth = particleSystem->depth;
             d.particleSystemId = (int32_t) i;
-            arrput(runner->cachedDrawables, d);
+            arrput(runner->scratchDrawables, d);
         }
         }
-
-        int32_t count = (int32_t) arrlen(runner->cachedDrawables);
-        if (count > 1) {
-            qsort(runner->cachedDrawables, count, sizeof(Drawable), compareDrawables);
-        }
-        runner->drawableListStructureDirty = false;
-        runner->drawableListSortDirty = false;
-        return;
     }
 
-    if (runner->drawableListSortDirty) {
-        int32_t count = (int32_t) arrlen(runner->cachedDrawables);
-        refreshDrawableDepths(runner, runner->cachedDrawables, count);
-        if (count > 1 && !isDrawableArraySorted(runner->cachedDrawables, count)) {
-            qsort(runner->cachedDrawables, count, sizeof(Drawable), compareDrawables);
-        }
-        runner->drawableListSortDirty = false;
+    // Merge: the same order a sort of everything gives (every key is unique), at the cost of sorting the instances.
+    Drawable* moving = runner->scratchDrawables;
+    Drawable* fixed = runner->cachedStaticDrawables;
+    int32_t movingCount = (int32_t) arrlen(moving);
+    int32_t fixedCount = (int32_t) arrlen(fixed);
+    sortDrawables(moving, movingCount);
+    arrsetlen(runner->cachedDrawables, movingCount + fixedCount);
+    Drawable* out = runner->cachedDrawables;
+    int32_t a = 0, b = 0, k = 0;
+    while (fixedCount > a && movingCount > b) {
+        DrawKey keyA = drawableKey(&fixed[a]);
+        DrawKey keyB = drawableKey(&moving[b]);
+        if (compareDrawKeys(&keyA, &keyB) <= 0) out[k++] = fixed[a++];
+        else out[k++] = moving[b++];
     }
+    while (fixedCount > a) out[k++] = fixed[a++];
+    while (movingCount > b) out[k++] = moving[b++];
+
+    runner->drawableListStructureDirty = false;
+    runner->drawableListInstancesDirty = false;
+    runner->drawableListSortDirty = false;
 }
 
 static void drawInstanceNormally(Runner* runner, Instance* inst) {
@@ -972,9 +1193,14 @@ void Runner_draw(Runner* runner) {
     // Draw interleaved tiles and instances
     int32_t i = 0;
     DrawKey lastProcessedDrawKey;
+    // Tiles come in runs of one depth (a big room has thousands), so their layer lookup is cached across a run. Anything
+    // else drawn (GML can show, hide or shift tile layers) drops the cache.
+    int32_t tileLayerDepth = 0;
+    ptrdiff_t tileLayerIdx = -1;
+    bool tileLayerCached = false;
 
     while (true) {
-        if (runner->drawableListSortDirty || runner->drawableListStructureDirty) {
+        if (runner->drawableListSortDirty || runner->drawableListStructureDirty || runner->drawableListInstancesDirty) {
             rebuildDrawableCacheIfDirty(runner);
 
             if (i != 0) {
@@ -1019,16 +1245,34 @@ void Runner_draw(Runner* runner) {
         Drawable* d = &runner->cachedDrawables[i++];
         lastProcessedDrawKey = drawableKey(d);
 
+        if (d->type != DRAWABLE_TILE) tileLayerCached = false;
         if (d->type == DRAWABLE_TILE) {
             if (runner->renderer != nullptr) {
                 RoomTile* tile = &room->tiles[d->tileIndex];
                 // Skip tiles whose layer was hidden via tile_layer_hide(). Filtered here (not in the cache) so toggling layer visibility doesn't invalidate.
-                ptrdiff_t layerIdx = hmgeti(runner->tileLayerMap, tile->tileDepth);
+                if (!tileLayerCached || tile->tileDepth != tileLayerDepth) {
+                    tileLayerIdx = hmgeti(runner->tileLayerMap, tile->tileDepth);
+                    tileLayerDepth = tile->tileDepth;
+                    tileLayerCached = true;
+                }
+                ptrdiff_t layerIdx = tileLayerIdx;
                 if (layerIdx >= 0 && !runner->tileLayerMap[layerIdx].value.visible) continue;
                 float offsetX = 0.0f, offsetY = 0.0f;
                 if (layerIdx >= 0) {
                     offsetX = runner->tileLayerMap[layerIdx].value.offsetX;
                     offsetY = runner->tileLayerMap[layerIdx].value.offsetY;
+                }
+
+                // This depth's tiles in one go, only the ones in view.
+                bool cullRun = true;
+#ifdef ENABLE_VM_TRACING
+                cullRun = shlen(runner->vmContext->tilesToBeTraced) == 0;
+#endif
+                int32_t runLength = cullRun ? drawTileRunCulled(runner, room, i - 1, offsetX, offsetY) : 0;
+                if (runLength > 0) {
+                    i += runLength - 1;
+                    lastProcessedDrawKey = drawableKey(&runner->cachedDrawables[i - 1]);
+                    continue;
                 }
 
 #ifdef ENABLE_VM_TRACING
@@ -1494,7 +1738,7 @@ static Instance* createAndInitInstance(Runner* runner, int32_t instanceId, int32
     hmput(runner->instancesById, instanceId, inst);
     arrput(runner->instances, inst);
     Runner_addInstanceToObjectLists(runner, inst);
-    runner->drawableListStructureDirty = true;
+    runner->drawableListInstancesDirty = true;
 
 #ifdef ENABLE_VM_TRACING
     if (shgeti(runner->vmContext->instanceLifecyclesToBeTraced, "*") != -1 || shgeti(runner->vmContext->instanceLifecyclesToBeTraced, objDef->name) != -1) {
@@ -1549,6 +1793,8 @@ static Instance** takePersistentInstances(Runner* runner) {
 
     arrfree(runner->instances);
     runner->instances = nullptr;
+    arrsetlen(runner->inactiveBBoxes, 0);
+    runner->inactiveBBoxesDirty = true;
 
     // The per-object lists referenced both the freed non-persistents and the carried persistents; clear them entirely.
     // Persistents are re-added when they return via returnPersistentInstances, and room-local instances are added as they get created.
@@ -1705,6 +1951,7 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
             arrput(runner->instances, savedState->instances[i]);
             Runner_addInstanceToObjectLists(runner, savedState->instances[i]);
         }
+        runner->inactiveBBoxesDirty = true;
         arrfree(savedState->instances);
         savedState->instances = nullptr;
 
@@ -2039,6 +2286,8 @@ static void cleanupState(Runner* runner) {
     }
     arrfree(runner->instances);
     runner->instances = nullptr;
+    arrsetlen(runner->inactiveBBoxes, 0);
+    runner->inactiveBBoxesDirty = true;
 
     // Empty the per-object lists. We keep the outer instancesByObject array allocated so Runner_reset can be reused; Runner_free releases it.
     Runner_clearAllObjectLists(runner);
@@ -2707,6 +2956,7 @@ Instance* Runner_copyInstance(Runner* runner, Instance* source, bool performEven
 
     Instance* inst = createAndInitInstance(runner, runner->nextInstanceId++, source->objectIndex, source->x, source->y);
     Instance_copyFields(source, inst);
+    if (!inst->active) runner->inactiveBBoxesDirty = true;
     if (DataWin_isVersionAtLeast(runner->dataWin, 2, 0, 0, 0)) {
         RuntimeLayer* layer = Runner_findRuntimeLayerById(runner, source->layer);
         if (layer != nullptr && !layer->automaticDepth)
@@ -2743,6 +2993,66 @@ static void clearDestroyedInstanceReferences(Runner* runner, Instance* destroyed
                 (uint32_t)value->int32 == destroyedInst->instanceId)
                 *value = RValue_makeInt32(INSTANCE_NOONE);
         }
+    }
+}
+
+// ===[ Inactive instances ]===
+
+static InactiveInstanceBBox inactiveBBoxOf(Runner* runner, Instance* inst) {
+    InactiveInstanceBBox e;
+    e.inst = inst;
+    if (Collision_getSprite(runner->dataWin, inst) != nullptr) {
+        InstanceBBox bbox = Collision_computeBBox(runner, inst);
+        e.left = bbox.left; e.top = bbox.top; e.right = bbox.right; e.bottom = bbox.bottom;
+    } else {
+        // Sprite-less instances are tested as their position.
+        e.left = e.right = inst->x;
+        e.top = e.bottom = inst->y;
+    }
+    return e;
+}
+
+static void rebuildInactiveBBoxes(Runner* runner) {
+    arrsetlen(runner->inactiveBBoxes, 0);
+    int32_t count = (int32_t) arrlen(runner->instances);
+    repeat(count, i) {
+        Instance* inst = runner->instances[i];
+        inst->inactiveSlot = -1;
+        if (inst->active || inst->destroyed) continue;
+        inst->inactiveSlot = (int32_t) arrlen(runner->inactiveBBoxes);
+        arrput(runner->inactiveBBoxes, inactiveBBoxOf(runner, inst));
+    }
+    runner->inactiveBBoxesDirty = false;
+}
+
+void Runner_trackInactiveInstance(Runner* runner, Instance* inst) {
+    if (runner->inactiveBBoxesDirty || inst->inactiveSlot >= 0) return;
+    inst->inactiveSlot = (int32_t) arrlen(runner->inactiveBBoxes);
+    arrput(runner->inactiveBBoxes, inactiveBBoxOf(runner, inst));
+}
+
+void Runner_untrackInactiveInstance(Runner* runner, Instance* inst) {
+    int32_t slot = inst->inactiveSlot;
+    if (0 > slot) return;
+    inst->inactiveSlot = -1;
+    // While dirty (or for an instance left over from another room) the slot is stale: the rebuild handles it.
+    int32_t last = (int32_t) arrlen(runner->inactiveBBoxes) - 1;
+    if (runner->inactiveBBoxesDirty || slot > last || runner->inactiveBBoxes[slot].inst != inst) return;
+    if (slot != last) {
+        runner->inactiveBBoxes[slot] = runner->inactiveBBoxes[last];
+        runner->inactiveBBoxes[slot].inst->inactiveSlot = slot;
+    }
+    arrpop(runner->inactiveBBoxes);
+}
+
+void Runner_activateRegion(Runner* runner, GMLReal left, GMLReal top, GMLReal right, GMLReal bottom, bool wantInside) {
+    if (runner->inactiveBBoxesDirty) rebuildInactiveBBoxes(runner);
+    // Backwards, since activating swap-removes the entry: the one moved into its slot was already visited.
+    for (int32_t i = (int32_t) arrlen(runner->inactiveBBoxes) - 1; i >= 0; i--) {
+        InactiveInstanceBBox* e = &runner->inactiveBBoxes[i];
+        bool outside = e->right < left || e->left > right || e->bottom < top || e->top > bottom;
+        if (outside == wantInside || e->inst->destroyed) continue;
+        Runner_setActiveState(runner, e->inst, true);
     }
 }
 
@@ -2943,13 +3253,14 @@ void Runner_cleanupDestroyedInstances(Runner* runner) {
         if (!inst->destroyed) {
             runner->instances[writeIdx++] = inst;
         } else {
+            Runner_untrackInactiveInstance(runner, inst);
             Runner_removeInstanceFromObjectLists(runner, inst);
             SpatialGrid_markInstanceAsDirty(runner->spatialGrid, inst);
             Runner_removeInstanceLayerElement(runner, inst->instanceId);
             hmdel(runner->instancesById, inst->instanceId);
             Instance_free(inst);
             // Cached drawables hold raw Instance* that we just freed; force a rebuild before the next draw.
-            runner->drawableListStructureDirty = true;
+            runner->drawableListInstancesDirty = true;
         }
     }
     arrsetlen(runner->instances, writeIdx);
@@ -3936,6 +4247,8 @@ static void persistRoomState(Runner* runner, int32_t roomIndex) {
     }
     arrfree(runner->instances);
     runner->instances = keptInstances;
+    arrsetlen(runner->inactiveBBoxes, 0);
+    runner->inactiveBBoxesDirty = true;
 
     // The per-object lists referenced the full pre-transition instance set (persistents, saved-to-state, and soon-to-be-freed). Only the kept persistents remain live, so rebuild from scratch from the final runner->instances.
     Runner_clearAllObjectLists(runner);
@@ -5113,6 +5426,11 @@ void Runner_free(Runner* runner) {
     }
 
     arrfree(runner->cachedDrawables);
+    arrfree(runner->cachedStaticDrawables);
+    arrfree(runner->scratchDrawables);
+    freeTileRuns(runner);
+    arrfree(runner->tileRuns);
+    arrfree(runner->inactiveBBoxes);
     runner->cachedDrawables = nullptr;
     arrfree(runner->instanceSnapshots);
     runner->instanceSnapshots = nullptr;

@@ -675,6 +675,31 @@ typedef struct {
 typedef struct { char* key; int32_t value; } AssetsByNameEntry;
 typedef struct { char* key; int value; } DisabledObjEntry;
 
+// A deactivated instance's bounding box, taken when it was deactivated (an inactive instance runs no events, so it
+// doesn't move). Packed so instance_activate_region scans a small array instead of every instance's sprite and bbox.
+typedef struct {
+    GMLReal left, top, right, bottom;
+    Instance* inst;
+} InactiveInstanceBBox;
+
+// GMS1 rooms: one depth's tiles (a run of Runner.cachedStaticDrawables), filed in a grid of cells by their top-left
+// corner, so drawing visits only the cells in view.
+typedef struct {
+    int32_t depth;
+    int32_t start, count;   // in cachedStaticDrawables
+    float originX, originY; // the grid's top-left (the run's leftmost / topmost tile edge)
+    float cellSize;
+    int32_t columns, rows;  // 0 columns: not culled (non-finite tile geometry)
+    float maxW, maxH;       // the run's largest tile
+    int32_t* cellStarts;    // columns * rows + 1 offsets into cellItems
+    int32_t* cellItems;     // run-relative indices, in draw order within each cell
+    uint32_t* visibleBits;  // scratch: one bit per tile, clear between draws
+} TileRun;
+
+// A platform's replacement for one piece of event code (by code index): returns true when it ran the event, false to
+// run the bytecode instead.
+typedef bool (*NativeEventCode)(struct Runner* runner, Instance* instance);
+
 struct Runner {
     DataWin* dataWin;
     VMContext* vmContext;
@@ -787,6 +812,22 @@ struct Runner {
     //   sortDirty      - the entries are the same but .depth values may have shifted. Refresh depths and only re-sort if order broke. Cheap when small depth shifts don't cross neighbors (typical depth=-y games).
     Drawable* cachedDrawables; // stb_ds array
     bool drawableListStructureDirty;
+    // Only the instance set changed (create/destroy): the room's tiles and layers (cachedStaticDrawables, kept sorted)
+    // stay, so only the instances are sorted and merged back in. AM2R rooms have thousands of tiles and some spawn
+    // instances every frame (lava bubbles), which made the full re-sort cost milliseconds a frame.
+    bool drawableListInstancesDirty;
+    Drawable* cachedStaticDrawables; // stb_ds array: tiles (GMS1) or runtime layers (GMS2), sorted
+    Drawable* scratchDrawables;      // stb_ds array: instances and particle systems while rebuilding
+    // GMS1: cachedStaticDrawables split by depth and bucketed by position, so a frame draws the tiles in view instead
+    // of handing the renderer every tile in the room (thousands in a big AM2R room). Rebuilt with the static part.
+    TileRun* tileRuns; // stb_ds array, in draw order (depth descending)
+    // Optional native replacements for event code, indexed by code index (nullptr: none). Owned by whoever sets it.
+    NativeEventCode* nativeEventCode;
+    // The current room's inactive instances (stb_ds array; each one's inactiveSlot is its index). AM2R deactivates most
+    // of the room every step and then activates regions around the view and around every enemy, so these scans are hot.
+    // Room changes mark it dirty; the next region activation rebuilds it from runner->instances.
+    InactiveInstanceBBox* inactiveBBoxes;
+    bool inactiveBBoxesDirty;
     bool drawableListSortDirty;
     // Struct instances created by @@NewGMLObject@@. Reuses Instance with objectIndex=STRUCT_OBJECT_INDEX.
     // Tracked separately so event/step/draw iteration over runner->instances stays clean.
@@ -1007,6 +1048,11 @@ void Runner_removeInstanceLayerElement(Runner* runner, int32_t instanceId);
 uint32_t Runner_getNextLayerId(Runner* runner);
 void Runner_freeRuntimeLayer(RuntimeLayer* runtimeLayer);
 // Sets the active state of the instance
+void Runner_trackInactiveInstance(Runner* runner, Instance* instance);
+void Runner_untrackInactiveInstance(Runner* runner, Instance* instance);
+// Activates the inactive instances whose bbox is inside (or, wantInside false, outside) the region.
+void Runner_activateRegion(Runner* runner, GMLReal left, GMLReal top, GMLReal right, GMLReal bottom, bool wantInside);
+
 static inline void Runner_setActiveState(Runner* runner, Instance* instance, bool active) {
 #ifdef ENABLE_VM_TRACING
     if (active != instance->active) {
@@ -1019,7 +1065,10 @@ static inline void Runner_setActiveState(Runner* runner, Instance* instance, boo
 #endif
 
     bool activating = active && !instance->active;
+    bool deactivating = !active && instance->active;
     instance->active = active;
+    if (deactivating) Runner_trackInactiveInstance(runner, instance);
+    else if (activating) Runner_untrackInactiveInstance(runner, instance);
     // An instance that was inactive when its room's collision grid was built (a persistent room restored with
     // deactivated instances) isn't in that grid; without this a reactivated solid that never moves stays invisible
     // to collisions.

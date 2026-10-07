@@ -39,6 +39,8 @@ struct Instance {
     uint16_t activeAlarmMask;
     int32_t maskIndex; // collision mask sprite override (-1 = use spriteIndex)
     int32_t* collisionCells; // Used to track where we are
+    uint32_t gridGeneration; // the SpatialGrid (its generation) collisionCells refer to, 0 = in no grid
+    int32_t inactiveSlot; // index in runner->inactiveBBoxes while deactivated, -1 otherwise
     uint32_t lastCollisionQueryId;
 
     // Per-instance self variable storage (sparse open-addressed hashmap, keyed by varID).

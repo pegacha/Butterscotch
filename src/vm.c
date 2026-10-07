@@ -468,6 +468,33 @@ static Variable* resolveVarDef(VMContext* ctx, uint32_t varRef) {
     return varDef;
 }
 
+// ===[ Slot arrays ]===
+// A script call's locals and arguments, and an event's locals, were each calloc'd and freed per call: hundreds of
+// allocator round trips a frame, which shows on slow allocators (the 3DS). Freed arrays go on a free list for their
+// size instead and come back zeroed. Callers free with the count they allocated (localVarCount / scriptArgCount).
+#define VM_SLOT_POOL_MAX 32
+static RValue* vmSlotPool[VM_SLOT_POOL_MAX + 1];
+
+static RValue* vmAllocSlots(uint32_t count) {
+    if (count > 0 && VM_SLOT_POOL_MAX >= count && vmSlotPool[count] != nullptr) {
+        RValue* slots = vmSlotPool[count];
+        memcpy(&vmSlotPool[count], slots, sizeof(RValue*));
+        memset(slots, 0, count * sizeof(RValue));
+        return slots;
+    }
+    return (RValue *)safeCalloc(count, sizeof(RValue));
+}
+
+static void vmFreeSlots(RValue* slots, uint32_t count) {
+    if (slots == nullptr) return;
+    if (count == 0 || count > VM_SLOT_POOL_MAX) {
+        free(slots);
+        return;
+    }
+    memcpy(slots, &vmSlotPool[count], sizeof(RValue*));
+    vmSlotPool[count] = slots;
+}
+
 // Maps a GML local's varID to its slot position in the current code's localVars[] array.
 //
 // BC15/16: varIDs for locals are already sequential slot indices (0, 1, 2, ...), so we return the varID unchanged.
@@ -485,9 +512,9 @@ static uint32_t resolveLocalSlot(VMContext* ctx, int32_t varID) {
     // Grow this frame's localVars window to cover `slot` whether the entry is pre-existing or freshly allocated.
     // Pre-existing entries can still be past ctx->localVarCount if a nested call to the same code extended the slot map while the outer frame was suspended (the outer frame's localVarCount is captured at call entry and doesn't follow later growth).
     if (slot >= ctx->localVarCount) {
-        RValue* resizedLocalVars = (RValue *)safeCalloc(slot + 1, sizeof(RValue));
+        RValue* resizedLocalVars = vmAllocSlots(slot + 1);
         memcpy(resizedLocalVars, ctx->localVars, sizeof(RValue) * ctx->localVarCount);
-        free(ctx->localVars);
+        vmFreeSlots(ctx->localVars, ctx->localVarCount);
         ctx->localVars = resizedLocalVars;
         ctx->localVarCount = slot + 1;
     }
@@ -659,11 +686,11 @@ static inline bool VM_ensureScriptArg(VMContext* ctx, int32_t writeIndex) {
     if (writeIndex < 0) return false;
     if (writeIndex < ctx->scriptArgCount) return true;
 
-    RValue* newScriptArgs = (RValue *)safeCalloc(writeIndex + 1, sizeof(RValue));
+    RValue* newScriptArgs = vmAllocSlots(writeIndex + 1);
 
     if (ctx->scriptArgCount > 0) {
         memcpy(newScriptArgs, ctx->scriptArgs, ctx->scriptArgCount * sizeof(RValue));
-        free(ctx->scriptArgs);
+        vmFreeSlots(ctx->scriptArgs, ctx->scriptArgCount);
     }
 
     ctx->scriptArgs = newScriptArgs;
@@ -3809,7 +3836,7 @@ RValue VM_executeCode(VMContext* ctx, int32_t codeIndex) {
     setCurrentCodeLocalsSlotMap(ctx);
 
     uint32_t localsCount = computeLocalsCount(ctx, code);
-    RValue* localVars = (RValue *)safeCalloc(localsCount, sizeof(RValue));
+    RValue* localVars = vmAllocSlots(localsCount);
     ctx->localVars = localVars;
     ctx->localVarCount = localsCount;
 
@@ -3834,7 +3861,7 @@ RValue VM_executeCode(VMContext* ctx, int32_t codeIndex) {
     repeat(ctx->localVarCount, i) {
         RValue_free(&ctx->localVars[i]);
     }
-    free(ctx->localVars);
+    vmFreeSlots(ctx->localVars, ctx->localVarCount);
     ctx->localVars = nullptr;
     ctx->localVarCount = 0;
 
@@ -3881,7 +3908,7 @@ RValue VM_callCodeIndex(VMContext* ctx, int32_t codeIndex, RValue* args, int32_t
     setCurrentCodeLocalsSlotMap(ctx);
 
     uint32_t localsCount = computeLocalsCount(ctx, code);
-    RValue* localVars = (RValue *)safeCalloc(localsCount, sizeof(RValue));
+    RValue* localVars = vmAllocSlots(localsCount);
     ctx->localVars = localVars;
     ctx->localVarCount = localsCount;
 
@@ -3890,7 +3917,7 @@ RValue VM_callCodeIndex(VMContext* ctx, int32_t codeIndex, RValue* args, int32_t
     // the caller's original args remain valid and owner-tracked by the caller.
     RValue* scriptArgs = nullptr;
     if (argCount > 0 && args != nullptr) {
-        scriptArgs = (RValue *)safeCalloc(argCount, sizeof(RValue));
+        scriptArgs = vmAllocSlots((uint32_t) argCount);
         repeat(argCount, argIdx) {
             RValue argCopy = RValue_makeIndependent(args[argIdx]);
             scriptArgs[argIdx] = argCopy;
@@ -3927,7 +3954,7 @@ RValue VM_callCodeIndex(VMContext* ctx, int32_t codeIndex, RValue* args, int32_t
         RValue_free(&ctx->localVars[i]);
     }
 
-    free(ctx->localVars);
+    vmFreeSlots(ctx->localVars, ctx->localVarCount);
 
     // Free callee script args
     {
@@ -3936,7 +3963,7 @@ RValue VM_callCodeIndex(VMContext* ctx, int32_t codeIndex, RValue* args, int32_t
     }
     }
 
-    free(ctx->scriptArgs);
+    vmFreeSlots(ctx->scriptArgs, (uint32_t) ctx->scriptArgCount);
 
     ctx->localVars = saved->savedLocals;
     ctx->localVarCount = saved->savedLocalsCount;

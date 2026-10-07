@@ -97,8 +97,15 @@ void SpatialGrid_syncGrid(Runner* runner, SpatialGrid* grid) {
 
         // We do not care about removed/inactive/destroyed instances, because they would've been already been removed from the grid on the "SpatialGrid_markInstanceAsDirty" call
         // We also do not care if the spatial grid is not dirty
-        if (instance == nullptr || !instance->active || instance->destroyed || !instance->spatialGridDirty)
+        if (instance == nullptr || instance->destroyed || !instance->spatialGridDirty)
             continue;
+
+        // Inactive: stays out of the grid for now. Clear the flag, or the activation that follows (a restored
+        // persistent room's deactivated solids) finds it still "dirty", is ignored, and the instance never joins.
+        if (!instance->active) {
+            instance->spatialGridDirty = false;
+            continue;
+        }
 
         instance->spatialGridDirty = false;
 

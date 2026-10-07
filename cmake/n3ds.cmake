@@ -13,7 +13,11 @@ set(N3DS_OUTPUT_NAME "butterscotch" CACHE STRING "Output base name (<name>.cia, 
 set(N3DS_SD_FOLDER "butterscotch" CACHE STRING "Game folder on the SD card: sdmc:/3ds/<folder>/")
 set(N3DS_UNIQUE_ID "0xB5C07" CACHE STRING "CIA unique ID (homebrew range 0x00300-0xF7FFF); title ID 00040000<id>00")
 set(N3DS_PRODUCT_CODE "CTR-P-BSCH" CACHE STRING "CIA product code")
-set(N3DS_ASSET_DIR "${CMAKE_SOURCE_DIR}/res/n3ds/${N3DS_SD_FOLDER}" CACHE PATH "Optional icon.png (48x48), banner.png (256x128) + banner.wav")
+set(N3DS_ASSET_DIR "" CACHE PATH "Optional icon.png (48x48), banner.png (256x128) + banner.wav (default: res/n3ds/<N3DS_SD_FOLDER>)")
+# The default follows N3DS_SD_FOLDER (a cached default would keep the folder of the first configure).
+if(N3DS_ASSET_DIR STREQUAL "" OR N3DS_ASSET_DIR STREQUAL "${CMAKE_SOURCE_DIR}/res/n3ds/butterscotch")
+    set(N3DS_ASSET_DIR "${CMAKE_SOURCE_DIR}/res/n3ds/${N3DS_SD_FOLDER}")
+endif()
 set(N3DS_SCREEN_MODE "wide" CACHE STRING "Default top-screen mode: wide (widescreen hack), stretch or pillarbox")
 set(N3DS_TOOLS_DIR "/root/kfx/3ds-prefix/bin" CACHE PATH "Where makerom and bannertool are")
 

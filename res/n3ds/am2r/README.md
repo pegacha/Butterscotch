@@ -1,4 +1,5 @@
-HOME Menu art for the AM2R build, picked up by cmake/n3ds.cmake: `icon.png` (48x48, the Metroid icon) and
+HOME Menu art for the AM2R build, picked up by cmake/n3ds.cmake: `icon.png` (48x48, AM2R's icon:  from the
+[AM2R Launcher](https://github.com/AM2R-Community-Developers/AM2RLauncher), scaled to a third with nearest-neighbour) and
 `banner.png` (256x128, the AM2R logo) with `banner.wav` (half a second of silence; a banner needs a sound).
 Without them the title gets libctru's default homebrew icon and no banner (bannertool is needed for the banner).
 

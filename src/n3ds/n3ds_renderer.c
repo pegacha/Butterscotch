@@ -69,7 +69,9 @@ static inline bool Renderer_isFiniteFloat(float v) { return isfinite(v); }
 #define N3DS_ATLAS_LINEAR_RESERVE_BYTES (3u * 1024u * 1024u)
 #define N3DS_ATLAS_IDLE_FRAMES 60u
 #define N3DS_MAX_CACHED_T3X_BYTES_OLD3DS (16u * 1024u * 1024u)
-#define N3DS_MAX_CACHED_T3X_BYTES_NEW3DS (24u * 1024u * 1024u)
+#define N3DS_MAX_CACHED_T3X_BYTES_NEW3DS (32u * 1024u * 1024u)
+// Sprite read-ahead: when a sprite frame is drawn, the pages of its next frames are read in the background.
+#define N3DS_READAHEAD_FRAMES 4
 #define N3DS_MAX_CACHED_DIRECT_T3X_BYTES_OLD3DS (4u * 1024u * 1024u)
 #define N3DS_MAX_CACHED_DIRECT_T3X_BYTES_NEW3DS (8u * 1024u * 1024u)
 #define N3DS_DIRECT_ASSET_VRAM_BUDGET_OLD3DS (1024u * 1024u)
@@ -204,6 +206,7 @@ typedef struct {
     uint32_t blobLastUsedStamp;
     bool ready;
     bool pinned;
+    bool readAhead; // queued by the sprite read-ahead: imported ahead of use (N3DSRenderer_importReadAhead)
     uint16_t width;
     uint16_t height;
     uint32_t textureFormat;
@@ -464,6 +467,12 @@ typedef struct {
     FILE* packedAtlasFile;
     N3DSBlobLoader blobLoader;
     bool blobLoaderRunning;
+    // Sprite read-ahead: each base TPAG's sprite and frame (-1: not a sprite frame), and per sprite the frame whose
+    // following frames were last queued.
+    int32_t* tpagSprite;
+    uint16_t* tpagFrame;
+    int32_t* spriteReadAheadFrame;
+    uint32_t readAheadSpriteCount;
     FILE* packedDirectAssetFile;
     uint32_t roomManifestEntryCount;
     uint32_t roomManifestPageRefCount;
@@ -543,6 +552,7 @@ static bool N3DSRenderer_tryDrawSingleGlyphTextFast(
 );
 static bool N3DSRenderer_drawPackedTileEntry(Renderer* base, N3DSRenderer* renderer, const N3DSTileAtlasEntry* tileEntry, float drawX, float drawY, float xscale, float yscale, uint32_t color, float alpha);
 static bool N3DSRenderer_isFragmentedAtlasVersion(uint16_t atlasVersion);
+static void N3DSRenderer_buildReadAheadMap(N3DSRenderer* renderer, DataWin* dataWin);
 static bool N3DSRenderer_isPackedAtlasVersion(uint16_t atlasVersion);
 static const char* N3DSRenderer_getTextureFormatName(uint32_t textureFormat);
 static void N3DSRenderer_sceneBeginTarget(N3DSRenderer* renderer, uint8_t targetKind, bool force);
@@ -1813,6 +1823,9 @@ static bool N3DSRenderer_ensurePageLoaded(N3DSRenderer* renderer, uint32_t pageI
     if (page->ready) {
         page->lastUsedStamp = ++renderer->atlasUseCounter;
         page->lastUsedFrame = renderer->frameSequence;
+        // The page's file data ages with the page's use, not its last import: a page drawn all the time (Samus) kept
+        // the stamp of its import and its data went first, so the next import after an idle spell read the card.
+        page->blobLastUsedStamp = ++renderer->blobUseCounter;
         return true;
     }
 
@@ -3545,6 +3558,7 @@ static void N3DSRenderer_init(Renderer* base, DataWin* dataWin) {
     renderer->cachedDirectT3xByteLimit = renderer->isNew3DS ? N3DS_MAX_CACHED_DIRECT_T3X_BYTES_NEW3DS : N3DS_MAX_CACHED_DIRECT_T3X_BYTES_OLD3DS;
     renderer->atlasLoaded = N3DSRenderer_loadAtlas(renderer);
     if (renderer->atlasLoaded) N3DSBlobLoader_start(renderer);
+    if (renderer->blobLoaderRunning) N3DSRenderer_buildReadAheadMap(renderer, dataWin);
     if (!renderer->atlasLoaded && renderer->startupError[0] == '\0') {
         N3DSRenderer_setStartupError(renderer, "Failed to load 3DS graphics atlas");
     }
@@ -3827,8 +3841,92 @@ static bool N3DSRenderer_tryResolveSingleFragmentFontPage(N3DSRenderer* renderer
     return true;
 }
 
+// ===[ Sprite read-ahead ]===
+// Animations whose frames sit on different pages (AM2R 1.5's title animation: a 512 KB page every 8 frames) loaded
+// each page from the card the frame it was first drawn. Drawing a sprite frame now queues the next frames' pages for
+// the background loader, so they are in the RAM cache by the time they are drawn.
+
+static void N3DSRenderer_buildReadAheadMap(N3DSRenderer* renderer, DataWin* dataWin) {
+    if (dataWin == NULL || dataWin->tpag.count == 0 || dataWin->sprt.count == 0) return;
+    renderer->tpagSprite = safeMalloc(dataWin->tpag.count * sizeof(int32_t));
+    renderer->tpagFrame = safeCalloc(dataWin->tpag.count, sizeof(uint16_t));
+    repeat(dataWin->tpag.count, i) renderer->tpagSprite[i] = -1;
+    repeat(dataWin->sprt.count, spriteIndex) {
+        Sprite* sprite = &dataWin->sprt.sprites[spriteIndex];
+        if (sprite->tpagIndices == NULL || sprite->textureCount < 2) continue;
+        repeat(sprite->textureCount, frame) {
+            int32_t tpag = sprite->tpagIndices[frame];
+            if (tpag < 0 || (uint32_t) tpag >= dataWin->tpag.count || renderer->tpagSprite[tpag] >= 0) continue;
+            renderer->tpagSprite[tpag] = (int32_t) spriteIndex;
+            renderer->tpagFrame[tpag] = (uint16_t) frame;
+        }
+    }
+    renderer->readAheadSpriteCount = dataWin->sprt.count;
+    renderer->spriteReadAheadFrame = safeMalloc(dataWin->sprt.count * sizeof(int32_t));
+    repeat(dataWin->sprt.count, i) renderer->spriteReadAheadFrame[i] = -1;
+}
+
+static void N3DSRenderer_readAheadPage(N3DSRenderer* renderer, uint32_t pageIndex) {
+    if (pageIndex >= renderer->atlasPageCount) return;
+    N3DSLoadedAtlasPage* page = &renderer->atlasPages[pageIndex];
+    if (page->ready) return;
+    page->readAhead = true;
+    if (page->t3xData == NULL) (void) N3DSRenderer_queuePageBlob(renderer, pageIndex);
+}
+
+// Turns one read-ahead page whose data has arrived into a texture (call with the frame open, before drawing): the
+// import (a copy into linear memory, a few ms for a 512 KB page) then happens before it is needed instead of in the
+// middle of the frame that first draws it.
+void N3DSRenderer_importReadAhead(Renderer* base) {
+    N3DSRenderer* renderer = (N3DSRenderer*) base;
+    if (!renderer->blobLoaderRunning) return;
+    N3DSRenderer_adoptFinishedPageBlobs(renderer);
+    repeat(renderer->atlasPageCount, i) {
+        N3DSLoadedAtlasPage* page = &renderer->atlasPages[i];
+        if (!page->readAhead) continue;
+        if (page->ready) {
+            page->readAhead = false;
+            continue;
+        }
+        if (page->t3xData == NULL) continue; // still being read
+        page->readAhead = false;
+        (void) N3DSRenderer_ensurePageLoaded(renderer, (uint32_t) i);
+        return;
+    }
+}
+
+static void N3DSRenderer_readAheadTPAG(N3DSRenderer* renderer, int32_t tpagIndex) {
+    if (tpagIndex < 0 || (uint32_t) tpagIndex >= renderer->atlasItemCount) return;
+    if (N3DSRenderer_isFragmentedAtlasVersion(renderer->atlasVersion)) {
+        N3DSAtlasItemV3* item = &renderer->atlasItemsV3[tpagIndex];
+        repeat(item->fragmentCount, i) {
+            uint32_t fragmentIndex = item->fragmentStart + (uint32_t) i;
+            if (fragmentIndex >= renderer->atlasFragmentCount) break;
+            N3DSRenderer_readAheadPage(renderer, renderer->atlasFragments[fragmentIndex].atlasId);
+        }
+        return;
+    }
+    N3DSRenderer_readAheadPage(renderer, renderer->atlasItems[tpagIndex].atlasId);
+}
+
+// A sprite frame is being drawn: queue the following frames' pages (once per frame change of each sprite).
+static inline void N3DSRenderer_readAhead(N3DSRenderer* renderer, int32_t tpagIndex) {
+    if (!renderer->blobLoaderRunning || renderer->tpagSprite == NULL || tpagIndex < 0 ||
+        (uint32_t) tpagIndex >= renderer->baseTPAGCount) return;
+    int32_t spriteIndex = renderer->tpagSprite[tpagIndex];
+    if (spriteIndex < 0) return;
+    int32_t frame = renderer->tpagFrame[tpagIndex];
+    if (renderer->spriteReadAheadFrame[spriteIndex] == frame) return;
+    renderer->spriteReadAheadFrame[spriteIndex] = frame;
+    Sprite* sprite = &renderer->base.dataWin->sprt.sprites[spriteIndex];
+    for (uint32_t ahead = 1; ahead <= N3DS_READAHEAD_FRAMES && ahead < sprite->textureCount; ahead++) {
+        N3DSRenderer_readAheadTPAG(renderer, sprite->tpagIndices[((uint32_t) frame + ahead) % sprite->textureCount]);
+    }
+}
+
 static void N3DSRenderer_drawSprite(Renderer* base, int32_t tpagIndex, float x, float y, float originX, float originY, float xscale, float yscale, float angleDeg, uint32_t color, float alpha) {
     N3DS_ZONE(N3DS_ZONE_SPRITE);
+    N3DSRenderer_readAhead((N3DSRenderer*) base, tpagIndex);
     if (!Renderer_isFiniteFloat(x) || !Renderer_isFiniteFloat(y) ||
         !Renderer_isFiniteFloat(originX) || !Renderer_isFiniteFloat(originY) ||
         !Renderer_isFiniteFloat(xscale) || !Renderer_isFiniteFloat(yscale) ||
@@ -3932,6 +4030,7 @@ static void N3DSRenderer_drawSpritePart(Renderer* base, int32_t tpagIndex, int32
     }
 
     N3DSRenderer* renderer = (N3DSRenderer*) base;
+    N3DSRenderer_readAhead(renderer, tpagIndex);
     N3DSDynamicCaptureTPAG* dynamicCapture = N3DSRenderer_getDynamicCaptureTPAG(renderer, tpagIndex);
     N3DSRenderer_traceTPAGUsage(renderer, N3DS_TRACE_KIND_SPRITE_PART, tpagIndex);
     renderer->frameSpritePartDrawCalls++;
@@ -4622,6 +4721,7 @@ static void N3DSRenderer_drawTiledPart(Renderer* base, int32_t tpagIndex, int32_
 
 static void N3DSRenderer_drawSpritePos(Renderer* base, int32_t tpagIndex, float x1, float y1, float x2, float y2, float x3, float y3, float x4, float y4, float alpha) {
     N3DS_ZONE(N3DS_ZONE_SPRITE_POS);
+    N3DSRenderer_readAhead((N3DSRenderer*) base, tpagIndex);
     if (!Renderer_isFiniteFloat(x1) || !Renderer_isFiniteFloat(y1) ||
         !Renderer_isFiniteFloat(x2) || !Renderer_isFiniteFloat(y2) ||
         !Renderer_isFiniteFloat(x3) || !Renderer_isFiniteFloat(y3) ||

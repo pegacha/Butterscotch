@@ -799,11 +799,11 @@ int main(int argc, char** argv) {
         // The GPU frame isn't opened here: the step runs while the GPU still draws the previous frame, and the first
         // renderer call that needs the GPU opens it (N3DSRenderer_frameGate), else the drawing below does. (The screen
         // captures here open it themselves when they run.)
-        bool frameOpenBeforeStep = N3DSRenderer_frameIsOpen();
         N3DSScreenshot_captureIfRequested(renderer);
         N3DSLiveMap_beginFrame();
         // Before the step: freezes the top screen when the pause screen opens and turns touches into its presses.
         bool paused = N3DSPause_update();
+        bool frameOpenBeforeStep = N3DSRenderer_frameIsOpen();
         u64 stepStartTick = svcGetSystemTick();
         {
             N3DS_ZONE(N3DS_ZONE_STEP);
@@ -846,6 +846,7 @@ int main(int argc, char** argv) {
         double waitMs = N3DSRenderer_frameWaitMs();
         double gpuMs = N3DSRenderer_frameGpuMs();
         if (frameOpenedInStep) stepMs -= waitMs; // the wait happened inside the step: count it as wait
+        N3DSRenderer_importReadAhead(renderer);
 
         bool roomChanged = runner->currentRoom != lastRoom;
         if (roomChanged) {

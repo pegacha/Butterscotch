@@ -3,6 +3,7 @@
 
 #include "n3ds_gml.h"
 #include "n3ds_platform_config.h"
+#include "n3ds_renderer.h"
 #include "n3ds_screen.h"
 
 #include "../log.h"
@@ -63,6 +64,7 @@ typedef struct {
     int32_t objBeam, objMissile, objMissileExpl, objBombExpl, objPBombExpl;
     int32_t objMetroids[4];
     int32_t objCharacter;
+    int32_t objSSFg, objSSBg, drawCoolText;
     int32_t sndSpin[5]; // the spin-jump loops: plain, Space Jump, Screw Attack, both, underwater
     int32_t sprA, sprB, sprX, sprY;
     int32_t sfxPlay, sndMenuMove, sndMenuSel;
@@ -324,6 +326,9 @@ void N3DSAm2r_init(Runner* runner) {
     gAm2r.sndMenuMove = N3DSGml_soundIndex("sndMenuMove");
     gAm2r.sndMenuSel = N3DSGml_soundIndex("sndMenuSel");
     gAm2r.objCharacter = N3DSGml_objectIndex("oCharacter");
+    gAm2r.objSSFg = N3DSGml_objectIndex("oSS_Fg");
+    gAm2r.objSSBg = N3DSGml_objectIndex("oSS_Bg");
+    gAm2r.drawCoolText = N3DSGml_scriptIndex("draw_cool_text");
     {
         static const char* const kSpin[5] = { "sndSpinJump", "sndSpaceJump", "sndScrewAttack", "sndSpaceScrewAttack", "sndSpinJumpWater" };
         repeat(5, i) gAm2r.sndSpin[i] = N3DSGml_soundIndex(kSpin[i]);
@@ -637,9 +642,74 @@ static void N3DSAm2r_stopStraySpinLoops(void) {
     }
 }
 
+// The pause screen without its fades: its foreground (oSS_Fg: the frame sliding in, then fading in, and fading out
+// before the game resumes) and background (oSS_Bg) are put at the end of each fade as soon as it starts.
+static void N3DSAm2r_skipPauseFades(void) {
+    Instance* fg = gAm2r.objSSFg >= 0 ? N3DSGml_firstInstance(gAm2r.objSSFg) : NULL;
+    if (fg != NULL) {
+        double fadein = 0.0, fadeout = 0.0;
+        N3DSGml_getVar(fg, "fadein", &fadein);
+        N3DSGml_getVar(fg, "fadeout", &fadeout);
+        if (fadeout != 0.0) {
+            N3DSGml_setVar(fg, "ealpha", 0.0);
+        } else if (fadein != 0.0) {
+            N3DSGml_setVar(fg, "rectoffset", 0.0);
+            N3DSGml_setVar(fg, "ealpha", 1.0);
+            N3DSGml_setVar(fg, "fadein", 0.0);
+        }
+    }
+    Instance* bg = gAm2r.objSSBg >= 0 ? N3DSGml_firstInstance(gAm2r.objSSBg) : NULL;
+    if (bg != NULL) {
+        double fadein = 0.0, fadeout = 0.0;
+        N3DSGml_getVar(bg, "fadein", &fadein);
+        N3DSGml_getVar(bg, "fadeout", &fadeout);
+        if (fadeout != 0.0) {
+            bg->imageAlpha = 0.0f;
+        } else if (fadein != 0.0) {
+            bg->imageAlpha = 1.0f;
+            N3DSGml_setVar(bg, "fadein", 0.0);
+        }
+    }
+}
+
+#define N3DS_AM2R_TOP_W 400
+#define N3DS_AM2R_TOP_H 240
+
+// "Paused" over the frozen game on the top screen while the pause screen is on the bottom one: a semi-transparent
+// black bar and the game's own item-message text (draw_cool_text in global.fontGUI, its colours).
+void N3DSAm2r_drawPausedBanner(Renderer* renderer) {
+    if (!gAm2r.active || renderer == NULL) return;
+    N3DSRenderer_beginTopScreenGUI(renderer, N3DS_AM2R_TOP_W, N3DS_AM2R_TOP_H);
+    const float barH = 36.0f, barY = ((float) N3DS_AM2R_TOP_H - barH) * 0.5f;
+    renderer->vtable->drawRectangle(renderer, 0.0f, barY, (float) N3DS_AM2R_TOP_W, barY + barH, 0x000000, 0.6f, false);
+    double font = -1.0;
+    if (gAm2r.drawCoolText >= 0 && N3DSGml_getGlobal("fontGUI", -1, &font)) {
+        int32_t savedFont = renderer->drawFont, savedHalign = renderer->drawHalign, savedValign = renderer->drawValign;
+        uint32_t savedColor = renderer->drawColor;
+        float savedAlpha = renderer->drawAlpha;
+        renderer->drawFont = (int32_t) font;
+        renderer->drawHalign = 1;
+        renderer->drawValign = 1;
+        RValue args[7] = {
+            RValue_makeReal((GMLReal) N3DS_AM2R_TOP_W * 0.5), RValue_makeReal((GMLReal) N3DS_AM2R_TOP_H * 0.5),
+            RValue_makeString("Paused"), RValue_makeReal(16777215.0), RValue_makeReal(16776960.0),
+            RValue_makeReal(8388608.0), RValue_makeReal(1.0),
+        };
+        RValue result = N3DSGml_callScript(gAm2r.drawCoolText, args, 7);
+        RValue_free(&result);
+        renderer->drawFont = savedFont;
+        renderer->drawHalign = savedHalign;
+        renderer->drawValign = savedValign;
+        renderer->drawColor = savedColor;
+        renderer->drawAlpha = savedAlpha;
+    }
+    N3DSRenderer_endTopScreenGUI(renderer);
+}
+
 void N3DSAm2r_update(void) {
     if (!gAm2r.active) return;
     N3DSAm2r_stopStraySpinLoops();
+    N3DSAm2r_skipPauseFades();
     N3DSAm2r_checkWidescreenSurface();
     N3DSAm2r_dropWaterFilter();
     N3DSAm2r_hideKeyboardRow();

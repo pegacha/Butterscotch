@@ -16,6 +16,8 @@ void N3DSRenderer_beginOverlay(Renderer* renderer);
 void N3DSRenderer_beginBottomScreenGUIEx(Renderer* renderer, int32_t guiW, int32_t guiH, float scaleX, float scaleY, float offsetX, float offsetY);
 void N3DSRenderer_beginBottomScreenGUI(Renderer* renderer, int32_t guiW, int32_t guiH);
 void N3DSRenderer_endBottomScreenGUI(Renderer* renderer);
+void N3DSRenderer_beginTopScreenGUI(Renderer* renderer, int32_t guiW, int32_t guiH);
+void N3DSRenderer_endTopScreenGUI(Renderer* renderer);
 void N3DSRenderer_beginBottomScreenGUI2x(Renderer* renderer, int32_t guiW, int32_t guiH);
 void N3DSRenderer_endBottomScreenGUI2x(Renderer* renderer);
 void N3DSRenderer_beginTopScreenGUI(Renderer* renderer, int32_t guiW, int32_t guiH);

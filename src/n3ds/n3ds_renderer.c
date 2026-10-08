@@ -3713,6 +3713,39 @@ void N3DSRenderer_beginBottomScreenGUIEx(Renderer* base, int32_t guiW, int32_t g
     N3DSRenderer_sceneBeginTarget(renderer, N3DS_SCENE_TARGET_BOTTOM, false);
 }
 
+// The top screen in guiW x guiH coordinates, for game drawing over the frame (the pause banner); end with
+// N3DSRenderer_endTopScreenGUI.
+void N3DSRenderer_beginTopScreenGUI(Renderer* base, int32_t guiW, int32_t guiH) {
+    if (base == NULL) return;
+    N3DSRenderer* renderer = (N3DSRenderer*) base;
+    if (renderer->bottomScreenGuiActive) return;
+    renderer->savedFrameScaleX = renderer->frameScaleX;
+    renderer->savedFrameScaleY = renderer->frameScaleY;
+    renderer->savedFrameOffsetX = renderer->frameOffsetX;
+    renderer->savedFrameOffsetY = renderer->frameOffsetY;
+    renderer->savedPortOffsetX = renderer->portOffsetX;
+    renderer->savedPortOffsetY = renderer->portOffsetY;
+    renderer->savedViewX = renderer->viewX;
+    renderer->savedViewY = renderer->viewY;
+    renderer->savedViewScaleX = renderer->viewScaleX;
+    renderer->savedViewScaleY = renderer->viewScaleY;
+    N3DSRenderer_computeFrameLayoutForTarget(renderer, guiW, guiH, N3DS_TOP_WIDTH, N3DS_TOP_HEIGHT);
+    renderer->viewX = 0;
+    renderer->viewY = 0;
+    renderer->viewScaleX = renderer->frameScaleX;
+    renderer->viewScaleY = renderer->frameScaleY;
+    renderer->portOffsetX = 0.0f;
+    renderer->portOffsetY = 0.0f;
+    renderer->bottomScreenGuiActive = true;
+    N3DSRenderer_flushC2DQueue(renderer);
+    N3DSRenderer_setDefaultGPUState(renderer);
+    N3DSRenderer_sceneBeginTarget(renderer, N3DS_SCENE_TARGET_TOP, false);
+}
+
+void N3DSRenderer_endTopScreenGUI(Renderer* base) {
+    N3DSRenderer_endBottomScreenGUI(base);
+}
+
 void N3DSRenderer_beginBottomScreenGUI(Renderer* base, int32_t guiW, int32_t guiH) {
     N3DSRenderer_beginBottomScreenGUIEx(base, guiW, guiH, 1.0f, 1.0f, 0.0f, 0.0f);
 }

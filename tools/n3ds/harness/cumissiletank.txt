@@ -1,0 +1,22 @@
+# AM2R 1.5.5: Samus onto the missile tank in rm_a0h07A; screenshots of the item screen (itemroom).
+seed 12345
+after_room titleroom
+press 800 START 4
+press 900 START 4
+press 1000 A 4
+press 1100 A 4
+press 1200 A 4
+after_room gameintroroom
+press 60 START 4
+press 120 START 4
+press 180 A 4
+after_room rm_a0h01
+goto 200 rm_a0h07A
+after_room rm_a0h07A
+place 5 296 446
+screenshot 4
+after_room itemroom
+screenshot 10
+screenshot 60
+screenshot 200
+exit 260

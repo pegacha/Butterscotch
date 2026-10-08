@@ -953,7 +953,10 @@ int main(int argc, char** argv) {
 #endif
         {
             N3DS_ZONE(N3DS_ZONE_OVERLAYS);
-            if (paused) N3DSRenderer_drawFrozenTop(renderer);
+            if (paused) {
+                N3DSRenderer_drawFrozenTop(renderer);
+                N3DSAm2r_drawPausedBanner(renderer);
+            }
             if (N3DSPause_inPlay() && N3DSLiveMap_available()) N3DSLiveMap_draw();
             else if (N3DSPause_showMapOnBottom()) N3DSRenderer_drawBottomSnapshot(renderer);
             if (debugMonitorVisible) N3DSDebugMonitor_draw(&debugMonitor, runner, renderer, paused);

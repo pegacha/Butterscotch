@@ -281,32 +281,34 @@ static void N3DSDebugMonitor_draw(N3DSDebugMonitor* monitor, Runner* runner, Ren
     N3DSRenderer_endScreenOverlay(renderer);
 }
 
-// "Saving..." in the top screen's bottom-right corner while the game's files have changes not yet on the SD card
-// (the second they are left to settle, then the write), held a little longer so it never just flickers.
-#define N3DS_SAVING_HOLD_MS 600u
-
+// The FPS counter (Display options): the debug monitor's frame rate, small, in the top screen's bottom-left corner.
 typedef struct {
     C2D_TextBuf buf;
     C2D_Text text;
-    u64 visibleUntilMs;
-} N3DSSavingIndicator;
+    int shown;
+} N3DSFpsCounter;
 
-static void N3DSSavingIndicator_draw(N3DSSavingIndicator* indicator, Renderer* renderer, bool saving) {
-    u64 nowMs = osGetTime();
-    if (saving) indicator->visibleUntilMs = nowMs + N3DS_SAVING_HOLD_MS;
-    if (nowMs >= indicator->visibleUntilMs) return;
-    if (indicator->buf == NULL) {
-        indicator->buf = C2D_TextBufNew(32);
-        C2D_TextParse(&indicator->text, indicator->buf, "Saving...");
-        C2D_TextOptimize(&indicator->text);
+static void N3DSFpsCounter_draw(N3DSFpsCounter* counter, Renderer* renderer, double fps) {
+    int value = (int) (fps + 0.5);
+    if (counter->buf == NULL) {
+        counter->buf = C2D_TextBufNew(16);
+        counter->shown = -1;
+    }
+    if (value != counter->shown) {
+        char line[16];
+        snprintf(line, sizeof(line), "%d", value);
+        C2D_TextBufClear(counter->buf);
+        C2D_TextParse(&counter->text, counter->buf, line);
+        C2D_TextOptimize(&counter->text);
+        counter->shown = value;
     }
     const float scale = 0.4f;
     float w = 0.0f, h = 0.0f;
-    C2D_TextGetDimensions(&indicator->text, scale, scale, &w, &h);
-    float x = (float) N3DS_TOP_SCREEN_W - w - 6.0f, y = (float) N3DS_TOP_SCREEN_H - h - 4.0f;
+    C2D_TextGetDimensions(&counter->text, scale, scale, &w, &h);
+    float x = 4.0f, y = (float) N3DS_TOP_SCREEN_H - h - 3.0f;
     N3DSRenderer_beginScreenOverlay(renderer, true);
-    C2D_DrawText(&indicator->text, C2D_WithColor, x + 1.0f, y + 1.0f, N3DS_OVERLAY_DEPTH, scale, scale, C2D_Color32(0, 0, 0, 160));
-    C2D_DrawText(&indicator->text, C2D_WithColor, x, y, N3DS_OVERLAY_DEPTH, scale, scale, C2D_Color32(255, 255, 255, 210));
+    C2D_DrawText(&counter->text, C2D_WithColor, x + 1.0f, y + 1.0f, N3DS_OVERLAY_DEPTH, scale, scale, C2D_Color32(0, 0, 0, 150));
+    C2D_DrawText(&counter->text, C2D_WithColor, x, y, N3DS_OVERLAY_DEPTH, scale, scale, C2D_Color32(255, 255, 255, 190));
     N3DSRenderer_endScreenOverlay(renderer);
 }
 
@@ -507,6 +509,16 @@ static const char* N3DS_screenModeName(N3DSScreenMode mode) {
 
 bool N3DS_getFrameskip(void) {
     return gFrameskip;
+}
+
+static bool gFpsCounter = false;
+
+bool N3DS_getFpsCounter(void) {
+    return gFpsCounter;
+}
+
+void N3DS_setFpsCounter(bool on) {
+    gFpsCounter = on;
 }
 
 void N3DS_setFrameskip(bool on) {
@@ -732,7 +744,7 @@ int main(int argc, char** argv) {
     N3DSLiveMap_init(runner, renderer);
     N3DSAm2r_init(runner);
     logInfo("Screen mode: %s\n", N3DS_screenModeName(gScreenMode));
-    N3DSSavingIndicator savingIndicator = {0};
+    N3DSFpsCounter fpsCounter = {0};
 #ifdef ENABLE_VM_GML_PROFILER
     Profiler_setEnabled(&vm->profiler, true);
 #endif
@@ -945,7 +957,7 @@ int main(int argc, char** argv) {
             if (N3DSPause_inPlay() && N3DSLiveMap_available()) N3DSLiveMap_draw();
             else if (N3DSPause_showMapOnBottom()) N3DSRenderer_drawBottomSnapshot(renderer);
             if (debugMonitorVisible) N3DSDebugMonitor_draw(&debugMonitor, runner, renderer, paused);
-            N3DSSavingIndicator_draw(&savingIndicator, renderer, N3DSCachedFileSystem_isSaving(fileSystem));
+            if (gFpsCounter) N3DSFpsCounter_draw(&fpsCounter, renderer, debugMonitor.displayedFps);
             renderer->vtable->flush(renderer);
         }
         // After the frame's drawing (all counted as draw): the room change, the renderer's texture collection and the

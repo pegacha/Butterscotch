@@ -18,3 +18,7 @@ void N3DS_setScreenMode(N3DSScreenMode mode);
 // Frameskip: two game steps per drawn frame (30 fps for a 60-step room), so the game keeps its speed.
 bool N3DS_getFrameskip(void);
 void N3DS_setFrameskip(bool on);
+
+// A small frame counter in the top screen's bottom-left corner.
+bool N3DS_getFpsCounter(void);
+void N3DS_setFpsCounter(bool on);

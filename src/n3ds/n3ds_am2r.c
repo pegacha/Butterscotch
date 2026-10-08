@@ -32,7 +32,7 @@
 #define N3DS_AM2R_CHEATS_FILE N3DS_SD_DIR "cheats.ini"
 
 enum { CHEAT_MASTER, CHEAT_HEALTH, CHEAT_AMMO, CHEAT_BEAM, CHEAT_BOMBS, CHEAT_MISSILES, CHEAT_COUNT };
-enum { DISPLAY_ROW_SCREEN, DISPLAY_ROW_FRAMESKIP, DISPLAY_ROW_NATIVE, DISPLAY_ROW_CHEATS, DISPLAY_ROW_EXIT, DISPLAY_ROW_COUNT };
+enum { DISPLAY_ROW_SCREEN, DISPLAY_ROW_FRAMESKIP, DISPLAY_ROW_NATIVE, DISPLAY_ROW_FPS, DISPLAY_ROW_CHEATS, DISPLAY_ROW_EXIT, DISPLAY_ROW_COUNT };
 
 typedef enum { PAGE_NONE, PAGE_DISPLAY, PAGE_CHEATS } N3DSAm2rPage;
 
@@ -268,6 +268,7 @@ static void N3DSAm2r_loadCheats(void) {
         if (strcmp(name, "screen") == 0 && value >= 0 && value < N3DS_AM2R_SCREEN_MODES) N3DS_setScreenMode(kScreenModes[value]);
         if (strcmp(name, "frameskip") == 0) N3DS_setFrameskip(value != 0);
         if (strcmp(name, "native") == 0) N3DSAm2rNative_setEnabled(value != 0);
+        if (strcmp(name, "fps") == 0) N3DS_setFpsCounter(value != 0);
         for (int i = 0; i < CHEAT_COUNT; i++) {
             if (strcmp(name, kCheatNames[i]) == 0) gAm2r.cheats[i] = value != 0;
         }
@@ -282,6 +283,7 @@ static void N3DSAm2r_saveCheats(void) {
     fprintf(f, "screen=%d\n", N3DSAm2r_screenModeSlot());
     fprintf(f, "frameskip=%d\n", N3DS_getFrameskip() ? 1 : 0);
     fprintf(f, "native=%d\n", N3DSAm2rNative_enabled() ? 1 : 0);
+    fprintf(f, "fps=%d\n", N3DS_getFpsCounter() ? 1 : 0);
     fclose(f);
 }
 
@@ -407,10 +409,13 @@ static void N3DSAm2r_refreshPage(void) {
         if (native != NULL) {
             N3DSGml_setVarString(native, "optext", N3DSAm2rNative_available() == 0 ? "N/A" : N3DSAm2rNative_enabled() ? "ON" : "OFF");
         }
+        Instance* fps = N3DSAm2r_pageRow(DISPLAY_ROW_FPS);
+        if (fps != NULL) N3DSGml_setVarString(fps, "optext", N3DS_getFpsCounter() ? "ON" : "OFF");
         const char* tip = selected == DISPLAY_ROW_SCREEN ? "Stretch fills the screen; 1x and 2x keep square pixels; Wide shows more of the room"
             : selected == DISPLAY_ROW_FRAMESKIP ? "A steady 30 fps at full game speed (draws every other frame)"
             : selected == DISPLAY_ROW_NATIVE ? (N3DSAm2rNative_available() == 0 ? "Not available for this version of the game"
                 : "Busy game scripts run as built-in code: faster, same behaviour")
+            : selected == DISPLAY_ROW_FPS ? "A small frame rate counter in the bottom-left corner"
             : selected == DISPLAY_ROW_CHEATS ? "Unlimited health and ammo, stronger weapons"
             : "Back to the options";
         N3DSGml_setGlobalString("tiptext", tip);
@@ -434,10 +439,11 @@ static void N3DSAm2r_openPage(N3DSAm2rPage page, int32_t selected) {
     gAm2r.pageTitle = title != NULL ? (int32_t) title->instanceId : -1;
     int count = N3DSAm2r_pageRowCount(page);
     for (int i = 0; i < count; i++) {
-        bool lrRow = page == PAGE_DISPLAY ? (i == DISPLAY_ROW_SCREEN || i == DISPLAY_ROW_FRAMESKIP || i == DISPLAY_ROW_NATIVE) : i < CHEAT_COUNT;
+        bool lrRow = page == PAGE_DISPLAY ? (i == DISPLAY_ROW_SCREEN || i == DISPLAY_ROW_FRAMESKIP || i == DISPLAY_ROW_NATIVE ||
+            i == DISPLAY_ROW_FPS) : i < CHEAT_COUNT;
         const char* label = i == count - 1 ? "Exit"
             : page == PAGE_DISPLAY ? (i == DISPLAY_ROW_SCREEN ? "Screen" : i == DISPLAY_ROW_FRAMESKIP ? "Frameskip"
-                : i == DISPLAY_ROW_NATIVE ? "Fast scripts" : "Cheats")
+                : i == DISPLAY_ROW_NATIVE ? "Fast scripts" : i == DISPLAY_ROW_FPS ? "FPS counter" : "Cheats")
             : kCheatLabels[i];
         Instance* row = N3DSGml_create(x, y + N3DS_AM2R_ROW_SEP * (float) (i + 1), lrRow ? gAm2r.objOptionLR : gAm2r.objPauseOption);
         gAm2r.pageRows[i] = row != NULL ? (int32_t) row->instanceId : -1;
@@ -513,6 +519,9 @@ static void N3DSAm2r_updatePage(void) {
     } else if (gAm2r.page == PAGE_DISPLAY && selected == DISPLAY_ROW_NATIVE && (menu1 || left || right) &&
                N3DSAm2rNative_available() > 0) {
         N3DSAm2rNative_setEnabled(!N3DSAm2rNative_enabled());
+        N3DSAm2r_sfx(gAm2r.sndMenuSel);
+    } else if (gAm2r.page == PAGE_DISPLAY && selected == DISPLAY_ROW_FPS && (menu1 || left || right)) {
+        N3DS_setFpsCounter(!N3DS_getFpsCounter());
         N3DSAm2r_sfx(gAm2r.sndMenuSel);
     } else if (gAm2r.page == PAGE_CHEATS && selected < CHEAT_COUNT && (menu1 || left || right)) {
         gAm2r.cheats[selected] = !gAm2r.cheats[selected];

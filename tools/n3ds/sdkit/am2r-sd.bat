@@ -6,6 +6,8 @@ rem   set AM2R_WSL_DISTRO=<name>   before running this (names: wsl -l -v).
 setlocal
 title AM2R 3DS - SD card builder
 set "REPO=pegacha/Butterscotch"
+rem Where am2r-sd.sh comes from if it is missing (a Codeberg release's copy has its own).
+set "SHURL=https://github.com/%REPO%/releases/latest/download/am2r-sd.sh"
 cd /d "%~dp0"
 
 rem A 32-bit cmd sees SysWOW64, which has no wsl.exe; Sysnative is the real System32 there.
@@ -38,7 +40,7 @@ if defined DISTRO (
 
 if not exist "am2r-sd.sh" (
     echo Downloading am2r-sd.sh ...
-    powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/%REPO%/releases/latest/download/am2r-sd.sh' -OutFile 'am2r-sd.sh'"
+    powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri '%SHURL%' -OutFile 'am2r-sd.sh'"
     if not exist "am2r-sd.sh" (
         echo Could not download am2r-sd.sh. Check the internet connection and try again.
         pause

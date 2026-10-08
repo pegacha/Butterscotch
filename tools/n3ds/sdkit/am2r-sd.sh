@@ -9,7 +9,9 @@ here="$(cd "$(dirname "$0")" && pwd)"
 bin="$here/bin"
 title="AM2R 3DS - SD card builder"
 repo="${AM2R_REPO:-pegacha/Butterscotch}"
-release="https://github.com/$repo/releases/latest/download"
+# Where the tools and am2r.cia come from: the release this script came with (a Codeberg release's copy has its own).
+release_page="https://github.com/$repo/releases/latest"
+release="${AM2R_RELEASE_URL:-$release_page/download}"
 
 have_whiptail() { command -v whiptail >/dev/null 2>&1; }
 in_wsl() { grep -qi microsoft /proc/version 2>/dev/null; }
@@ -117,7 +119,7 @@ main() {
     ensure_tools
     msg "This builds the AM2R files for the 3DS's SD card.
 
-You need your own copy of AM2R 1.1 (or the Community Updates made from it with the AM2R Launcher). Pick its data.win, then a folder: the files go in <folder>/3ds/am2r/. Copy that 3ds folder to the root of the SD card."
+You need your own copy of AM2R, updated with the AM2R Launcher. Pick its data.win, then a folder: the files go in <folder>/3ds/am2r/. Copy that 3ds folder to the root of the SD card."
 
     local datawin
     datawin=$(browse file "$(start_dir)") || exit 0
@@ -160,7 +162,7 @@ This takes a few minutes. Go?" || exit 0
         ciamsg="am2r.cia is in $outroot too: copy it to the SD card and install it with FBI (or scan the QR code on the release page)."
     else
         rm -f "$cia"
-        ciamsg="Install am2r.cia with FBI from the release page: https://github.com/$repo/releases/latest"
+        ciamsg="Install am2r.cia with FBI from the release page: $release_page"
     fi
 
     local size; size=$(du -sh "$out" 2>/dev/null | cut -f1)
